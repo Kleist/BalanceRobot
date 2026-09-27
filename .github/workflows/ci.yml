@@ -111,7 +111,7 @@ jobs:
         if: github.event_name == 'pull_request'
         # PRs from forks get a read-only token; the report is still in the job summary.
         continue-on-error: true
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: coverage
           path: ${{ runner.temp }}/coverage.md
