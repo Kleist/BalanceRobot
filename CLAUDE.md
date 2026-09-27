@@ -106,6 +106,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Read raw accelerometer + gyro values from the IMU and log them as CSV at ~100 Hz (done before the Embassy blink and I2C scan)
 - [ ] Same blink with Embassy (async task + timer)
 - [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
+- [x] Accel pitch math in `balance-core` (`attitude::accel_pitch_deg`), unit tested
 - [ ] Pitch angle from the accelerometer only (see how noisy it is)
 - [ ] Calibrate the gyro bias at startup
 - [ ] Pitch angle by integrating the gyro only (see the drift)

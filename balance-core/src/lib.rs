@@ -5,6 +5,8 @@
 
 #![no_std]
 
+pub mod attitude;
+
 /// Limits a motor duty command to the valid range `-1.0..=1.0`.
 ///
 /// Negative values mean reverse. `NaN` (e.g. from a division by zero
