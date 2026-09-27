@@ -16,6 +16,8 @@ esp-hal = { version = "1.2", features = ["esp32c3"] }
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32c3"] }
 # println! over the USB-Serial-JTAG only: never touch UART0 (GPIO20/21 are IN3/IN4 on the L298N).
 esp-println = { version = "0.18", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
+# Driver for the onboard ICM-42670-P IMU, built on the embedded-hal 1.0 I2C trait that esp-hal implements.
+icm42670 = "0.2"
 # Panic handler that prints the panic message and a backtrace.
 esp-backtrace = { version = "0.20", features = ["esp32c3", "panic-handler", "println"] }
 

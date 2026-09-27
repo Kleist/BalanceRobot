@@ -88,7 +88,8 @@ cargo build --release
 
 - `esp-hal` + Embassy (no_std), async
 - LEDC for motor PWM on both channels
-- `icm42670` crate for the onboard IMU (embedded-hal)
+- `icm42670` crate for the onboard IMU (embedded-hal). v0.2 reads each register byte in its own I2C transaction (12 per accel+gyro sample, high/low bytes not read atomically): fine for logging, too slow and tear-prone for a 500 Hz loop
+- IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz` in raw LSB; accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
 - The onboard IMU interrupt is probably not broken out: drive the control loop from an Embassy ticker at ~500 Hz and poll the IMU
 - BLE later. **ESP32-C3 is BLE only (no Classic BT / SPP)**, so the Android app must use GATT
 
@@ -102,12 +103,13 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Install the toolchain and `espflash` locally, flash the skeleton
 - [x] See a "hello" log over USB-Serial-JTAG
 - [x] Blink the LED on GPIO7 (blocking delay)
+- [x] Read raw accelerometer + gyro values from the IMU and log them as CSV at ~100 Hz (done before the Embassy blink and I2C scan)
 - [ ] Same blink with Embassy (async task + timer)
 - [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
-- [ ] Read raw accelerometer values from the IMU and print them
 - [ ] Pitch angle from the accelerometer only (see how noisy it is)
-- [ ] Read the gyro, calibrate its bias at startup
+- [ ] Calibrate the gyro bias at startup
 - [ ] Pitch angle by integrating the gyro only (see the drift)
+- [ ] Burst-read the IMU (one I2C transaction per sample) so it keeps up with the control loop
 - [ ] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
 - [ ] One motor, one direction, full speed (wheels off the ground)
 - [ ] Both directions, then PWM speed control via LEDC
