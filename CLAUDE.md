@@ -63,8 +63,8 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 ## Project layout & checks
 
 - `balance-core/` - all logic that doesn't touch hardware (filters, PID, motor mapping, battery math). `#![no_std]`, no hardware deps, unit-tested on the host. Put as much code here as possible.
-- `firmware/` (coming next) - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target.
-- Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests). CI treats warnings as errors.
+- `firmware/` - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target (its `.cargo/config.toml` sets the target, linker script and `espflash` runner). `cd firmware && cargo run --release` builds, flashes and opens the log monitor; flashing needs the user in the `dialout` group.
+- Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests), mirrored in `firmware/Cargo.toml`; keep the two in sync. CI treats warnings as errors.
 - Toolchain is pinned in `rust-toolchain.toml`.
 - Coverage is **reported, not enforced**: CI posts a PR comment comparing base vs PR. Decide per PR whether a drop is acceptable.
 
@@ -77,6 +77,11 @@ cargo test --workspace
 cargo build -p balance-core --target riscv32imc-unknown-none-elf   # still no_std?
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo llvm-cov --workspace --open    # coverage report (cargo install cargo-llvm-cov)
+
+cd firmware
+cargo fmt --check
+cargo clippy --release -- -D warnings
+cargo build --release
 ```
 
 ## Software stack
@@ -93,10 +98,10 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 
 - [x] Create this CLAUDE.md
 - [x] CI + `balance-core` skeleton: fmt, clippy, unit tests, no_std check, docs, coverage report
-- [ ] Minimal firmware crate (no Embassy yet) + full firmware build in CI; understand each file
-- [ ] Install the toolchain and `espflash` locally, flash the skeleton
-- [ ] See a "hello" log over USB-Serial-JTAG
-- [ ] Blink the LED on GPIO7 (blocking delay)
+- [x] Minimal firmware crate (no Embassy yet) + full firmware build in CI; understand each file
+- [x] Install the toolchain and `espflash` locally, flash the skeleton
+- [x] See a "hello" log over USB-Serial-JTAG
+- [x] Blink the LED on GPIO7 (blocking delay)
 - [ ] Same blink with Embassy (async task + timer)
 - [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
 - [ ] Read raw accelerometer values from the IMU and print them

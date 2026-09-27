@@ -1,0 +1,14 @@
+[build]
+# ESP32-C3: 32-bit RISC-V with Integer, Multiply and Compressed instructions (no FPU, no atomics).
+target = "riscv32imc-unknown-none-elf"
+
+[target.riscv32imc-unknown-none-elf]
+# `cargo run` flashes the board and then shows its log output.
+runner = "espflash flash --monitor --chip esp32c3"
+rustflags = [
+  # Linker script from esp-hal: memory map and section layout of the ESP32-C3.
+  "-C", "link-arg=-Tlinkall.x",
+  # Keep frame pointers so esp-backtrace can print a useful backtrace on panic.
+  "-C", "force-frame-pointers",
+]
+

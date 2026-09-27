@@ -54,6 +54,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p balance-core --target riscv32imc-unknown-none-elf
 
+  firmware:
+    name: Firmware (ESP32-C3)
+    runs-on: ubuntu-latest
+    # firmware/ is its own cargo workspace; its .cargo/config.toml sets the target and linker script.
+    defaults:
+      run:
+        working-directory: firmware
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware
+      - run: cargo fmt --check
+      - run: cargo clippy --release -- -D warnings
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-elf
+          path: firmware/target/riscv32imc-unknown-none-elf/release/balance-robot
+
   docs:
     name: Docs
     runs-on: ubuntu-latest
