@@ -60,6 +60,25 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 - L298N drops ~2 V, so motors see ~5-6 V (fine for TT motors, but torque sags as the battery drains).
 - L298N logic inputs accept 3.3 V (V_IH min 2.3 V).
 
+## Project layout & checks
+
+- `balance-core/` - all logic that doesn't touch hardware (filters, PID, motor mapping, battery math). `#![no_std]`, no hardware deps, unit-tested on the host. Put as much code here as possible.
+- `firmware/` (coming in step 3) - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target.
+- Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests). CI treats warnings as errors.
+- Toolchain is pinned in `rust-toolchain.toml`.
+- Coverage is **reported, not enforced**: CI posts a PR comment comparing base vs PR. Decide per PR whether a drop is acceptable.
+
+Run the same checks as CI locally:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build -p balance-core --target riscv32imc-unknown-none-elf   # still no_std?
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo llvm-cov --workspace --open    # coverage report (cargo install cargo-llvm-cov)
+```
+
 ## Software stack
 
 - `esp-hal` + Embassy (no_std), async
@@ -73,24 +92,25 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 Small steps, one PR each. Mark steps done as they are completed.
 
 1. ~~Create this CLAUDE.md~~ (done)
-2. Toolchain: install Rust (>= 1.95 for current esp-hal), `riscv32imc-unknown-none-elf` target, `rust-src`, `espflash`
-3. Minimal project scaffold that builds (no Embassy yet), understand each file
-4. Flash it and see a "hello" log over USB-Serial-JTAG
-5. Blink the LED on GPIO7 (blocking delay)
-6. Same blink with Embassy (async task + timer)
-7. I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
-8. Read raw accelerometer values from the IMU and print them
-9. Pitch angle from the accelerometer only (see how noisy it is)
-10. Read the gyro, calibrate its bias at startup
-11. Pitch angle by integrating the gyro only (see the drift)
-12. Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
-13. One motor, one direction, full speed (wheels off the ground)
-14. Both directions, then PWM speed control via LEDC
-15. Both motors: verify directions, measure the PWM deadband
-16. Battery voltage via ADC on GPIO4
-17. P-only tilt loop, then add D, then I; tuning
-18. BLE: advertise and show up on the phone
-19. BLE GATT control (steering / setpoint) from Android
+2. ~~CI + `balance-core` skeleton: fmt, clippy, unit tests, no_std check, docs, coverage report~~ (done)
+3. Minimal firmware crate (no Embassy yet) + full firmware build in CI; understand each file
+4. Install the toolchain and `espflash` locally, flash the skeleton
+5. See a "hello" log over USB-Serial-JTAG
+6. Blink the LED on GPIO7 (blocking delay)
+7. Same blink with Embassy (async task + timer)
+8. I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
+9. Read raw accelerometer values from the IMU and print them
+10. Pitch angle from the accelerometer only (see how noisy it is)
+11. Read the gyro, calibrate its bias at startup
+12. Pitch angle by integrating the gyro only (see the drift)
+13. Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
+14. One motor, one direction, full speed (wheels off the ground)
+15. Both directions, then PWM speed control via LEDC
+16. Both motors: verify directions, measure the PWM deadband
+17. Battery voltage via ADC on GPIO4
+18. P-only tilt loop, then add D, then I; tuning
+19. BLE: advertise and show up on the phone
+20. BLE GATT control (steering / setpoint) from Android
 
 ## Known limitations of the prototype
 

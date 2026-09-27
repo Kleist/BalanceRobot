@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["balance-core"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license-file = "LICENSE"
+
+# Shared lint policy for every crate in the workspace (crates opt in with `lints.workspace = true`).
+# CI runs clippy with `-D warnings`, so every "warn" here is an error in CI.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# A panic on the robot means a crash mid-balance. Handle errors explicitly instead.
+# Allowed in tests via clippy.toml.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"

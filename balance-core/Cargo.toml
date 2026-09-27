@@ -1,0 +1,11 @@
+[package]
+name = "balance-core"
+version = "0.1.0"
+description = "Hardware-independent balancing logic (filters, control, motor mapping)"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish = false
+
+[lints]
+workspace = true
