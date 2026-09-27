@@ -108,6 +108,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
 - [x] Accel pitch math in `balance-core` (`attitude::accel_pitch_deg`), unit tested
 - [ ] Pitch angle from the accelerometer only (see how noisy it is)
+- [x] Gyro bias calibration math in `balance-core` (`gyro::BiasCalibrator`), unit tested
 - [ ] Calibrate the gyro bias at startup
 - [ ] Pitch angle by integrating the gyro only (see the drift)
 - [ ] Burst-read the IMU (one I2C transaction per sample) so it keeps up with the control loop
