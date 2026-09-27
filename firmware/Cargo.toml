@@ -11,7 +11,15 @@ publish = false
 [workspace]
 
 [dependencies]
-esp-hal = { version = "1.2", features = ["esp32c3"] }
+# `unstable` is required by esp-rtos (it builds on esp-hal APIs that are not yet covered by semver).
+esp-hal = { version = "1.2", features = ["esp32c3", "unstable"] }
+# Runs the Embassy executor on top of esp-hal and provides the time driver (Timer/Ticker) from a hardware timer.
+esp-rtos = { version = "0.4", features = ["esp32c3", "embassy"] }
+# Async task executor: we only use its `#[task]` macro and `Spawner`; esp-rtos supplies the executor
+# itself, so no `platform-*` / `executor-*` features here.
+embassy-executor = "0.10"
+# Async `Timer` and `Ticker`.
+embassy-time = "0.5"
 # Writes the app descriptor the ESP-IDF 2nd stage bootloader expects (espflash refuses images without it).
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32c3"] }
 # println! over the USB-Serial-JTAG only: never touch UART0 (GPIO20/21 are IN3/IN4 on the L298N).
