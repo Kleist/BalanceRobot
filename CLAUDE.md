@@ -86,7 +86,7 @@ cargo build --release
 
 ## Software stack
 
-- `esp-hal` + Embassy (no_std), async
+- `esp-hal` + Embassy (no_std), async. `esp-rtos` (feature `embassy`) runs the executor and the time driver (TIMG0 + `FROM_CPU_INTR0`); it needs esp-hal's `unstable` feature. `embassy-executor` is only used for `#[task]`/`Spawner`: never enable its `platform-*`/`executor-*` features
 - LEDC for motor PWM on both channels
 - `icm42670` crate for the onboard IMU (embedded-hal). v0.2 reads each register byte in its own I2C transaction (12 per accel+gyro sample, high/low bytes not read atomically): fine for logging, too slow and tear-prone for a 500 Hz loop
 - IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz` in raw LSB; accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
@@ -104,7 +104,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] See a "hello" log over USB-Serial-JTAG
 - [x] Blink the LED on GPIO7 (blocking delay)
 - [x] Read raw accelerometer + gyro values from the IMU and log them as CSV at ~100 Hz (done before the Embassy blink and I2C scan)
-- [ ] Same blink with Embassy (async task + timer)
+- [x] Same blink with Embassy (async task + timer); IMU logging moved to a 10 ms `Ticker`
 - [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
 - [ ] Pitch angle from the accelerometer only (see how noisy it is)
 - [ ] Calibrate the gyro bias at startup

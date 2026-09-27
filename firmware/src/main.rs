@@ -1,16 +1,19 @@
-//! Read raw accelerometer and gyro samples from the onboard ICM-42670-P and log them
-//! over USB-Serial-JTAG as CSV lines, ~100 per second. The LED on GPIO7 toggles on
-//! every sample, so a steady glow/flicker means the loop is running.
+//! Two async Embassy tasks sharing one CPU:
+//! - `heartbeat` double-blinks the LED on GPIO7 ("lub-dub", once a second);
+//! - `main` reads raw accelerometer and gyro samples from the onboard ICM-42670-P and
+//!   logs them over USB-Serial-JTAG as CSV lines, 100 per second.
 
 #![no_std]
 #![no_main]
 
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Ticker, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{Level, Output, OutputConfig},
     i2c::master::{Config as I2cConfig, I2c},
-    main,
-    time::{Duration, Instant, Rate},
+    time::{Instant, Rate},
+    timer::timg::TimerGroup,
 };
 use esp_println::println;
 use icm42670::{AccelRange, Address, GyroRange, Icm42670, prelude::*};
@@ -23,15 +26,21 @@ const ACCEL_RANGE: AccelRange = AccelRange::G4;
 const GYRO_RANGE: GyroRange = GyroRange::Deg500;
 const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 
-/// Busy-wait. Fine for now; later steps replace this with async Embassy timers.
-fn wait_until(deadline: Instant) {
-    while Instant::now() < deadline {}
-}
-
-#[main]
-fn main() -> ! {
+#[esp_rtos::main]
+async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
-    let mut led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
+
+    // esp-rtos drives the Embassy time driver from this hardware timer; the software
+    // interrupt lets it wake the executor when a timer expires.
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+
+    let led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
+    // Calling a task function only builds it; it fails if its static slot is already in use.
+    match heartbeat(led) {
+        Ok(task) => spawner.spawn(task),
+        Err(e) => println!("# heartbeat task not started: {e:?}"),
+    }
 
     // The board wires the IMU (and the SHTC3) to SDA = GPIO10, SCL = GPIO8, with pull-ups.
     // 400 kHz "fast mode": the driver does one I2C transaction per register byte, so speed matters.
@@ -40,19 +49,19 @@ fn main() -> ! {
         I2cConfig::default().with_frequency(Rate::from_khz(400)),
     ) {
         Ok(i2c) => i2c.with_sda(peripherals.GPIO10).with_scl(peripherals.GPIO8),
-        Err(e) => halt(format_args!("I2C config rejected: {e:?}")),
+        Err(e) => halt(format_args!("I2C config rejected: {e:?}")).await,
     };
 
     // `new` checks WHO_AM_I and switches accel + gyro on (the chip powers up asleep).
     let mut imu = match Icm42670::new(i2c, Address::Primary) {
         Ok(imu) => imu,
-        Err(e) => halt(format_args!("IMU not found at 0x68: {e:?}")),
+        Err(e) => halt(format_args!("IMU not found at 0x68: {e:?}")).await,
     };
     if let Err(e) = imu
         .set_accel_range(ACCEL_RANGE)
         .and_then(|()| imu.set_gyro_range(GYRO_RANGE))
     {
-        halt(format_args!("IMU range setup failed: {e:?}"));
+        halt(format_args!("IMU range setup failed: {e:?}")).await;
     }
 
     // Header lines start with '#' so a CSV parser can skip them.
@@ -63,9 +72,10 @@ fn main() -> ! {
     );
     println!("t_us,ax,ay,az,gx,gy,gz");
 
-    let mut next = Instant::now();
+    // A Ticker fires on a fixed schedule (every 10 ms since it was created), so the rate
+    // doesn't drift by however long the reads and prints take.
+    let mut ticker = Ticker::every(SAMPLE_PERIOD);
     loop {
-        next += SAMPLE_PERIOD;
         let t_us = Instant::now().duration_since_epoch().as_micros();
 
         match (imu.accel_raw(), imu.gyro_raw()) {
@@ -74,15 +84,32 @@ fn main() -> ! {
             (_, Err(e)) => println!("# gyro read failed: {e:?}"),
         }
 
-        led.toggle();
-        wait_until(next);
+        // `.await` hands the CPU back to the executor, which runs `heartbeat` in the gaps.
+        ticker.next().await;
+    }
+}
+
+/// Double-blink ("lub-dub") once a second, independent of what `main` is doing.
+///
+/// `'static` because a task outlives `main`'s stack frame as far as the compiler knows.
+#[embassy_executor::task]
+async fn heartbeat(mut led: Output<'static>) {
+    loop {
+        led.set_high();
+        Timer::after_millis(100).await;
+        led.set_low();
+        Timer::after_millis(100).await;
+        led.set_high();
+        Timer::after_millis(100).await;
+        led.set_low();
+        Timer::after_millis(700).await;
     }
 }
 
 /// Setup failed: keep printing why, so the message shows up even if the monitor attaches late.
-fn halt(reason: core::fmt::Arguments) -> ! {
+async fn halt(reason: core::fmt::Arguments<'_>) -> ! {
     loop {
         println!("# FATAL: {reason}");
-        wait_until(Instant::now() + Duration::from_secs(1));
+        Timer::after_secs(1).await;
     }
 }
