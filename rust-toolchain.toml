@@ -1,0 +1,6 @@
+# Pins the Rust version so local builds and CI use the same compiler and lints.
+# rustup reads this file and installs everything listed automatically.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy", "llvm-tools"]
+targets = ["riscv32imc-unknown-none-elf"]

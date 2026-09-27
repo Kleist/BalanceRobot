@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel a running CI when a newer commit is pushed to the same branch/PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # rustup installs the version, components and targets from rust-toolchain.toml.
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  no-std:
+    name: no_std build (ESP32-C3 target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p balance-core --target riscv32imc-unknown-none-elf
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  coverage:
+    name: Coverage (report only)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # to post the coverage comment
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # needed to check out the base branch below
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Coverage of this commit
+        run: |
+          cargo llvm-cov --workspace --html
+          cargo llvm-cov report --json --summary-only --output-path "$RUNNER_TEMP/head.json"
+
+      - name: Coverage of the base branch
+        if: github.event_name == 'pull_request'
+        # Never fail CI because the base can't be measured (e.g. it has no Rust code yet).
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "origin/$BASE_REF"
+          cd "$RUNNER_TEMP/base"
+          cargo llvm-cov --workspace --json --summary-only --output-path "$RUNNER_TEMP/base.json"
+
+      - name: Build report
+        run: |
+          .github/scripts/coverage-table.sh "$RUNNER_TEMP/head.json" "$RUNNER_TEMP/base.json" > "$RUNNER_TEMP/coverage.md"
+          cat "$RUNNER_TEMP/coverage.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
+
+      - name: Post coverage comment on the PR
+        if: github.event_name == 'pull_request'
+        # PRs from forks get a read-only token; the report is still in the job summary.
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          path: ${{ runner.temp }}/coverage.md
