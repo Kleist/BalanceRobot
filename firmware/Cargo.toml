@@ -18,6 +18,9 @@ esp-bootloader-esp-idf = { version = "0.6", features = ["esp32c3"] }
 esp-println = { version = "0.18", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
 # Driver for the onboard ICM-42670-P IMU, built on the embedded-hal 1.0 I2C trait that esp-hal implements.
 icm42670 = "0.2"
+# Our own hardware-independent logic (pitch math, later filters and PID): unit-tested on the
+# host in the root workspace, compiled into the firmware from source here.
+balance-core = { path = "../balance-core" }
 # Panic handler that prints the panic message and a backtrace.
 esp-backtrace = { version = "0.20", features = ["esp32c3", "panic-handler", "println"] }
 
