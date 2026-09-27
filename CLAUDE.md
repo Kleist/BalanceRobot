@@ -36,6 +36,8 @@ This repo starts by reviving an **old prototype chassis** as a test bed. Code de
 
 ## Pinout plan
 
+Full wiring (every connection, with what is wired so far and a diagram): [`docs/wiring.md`](docs/wiring.md). Keep the two in sync.
+
 | Function | GPIO |
 |---|---|
 | ENA (PWM, LEDC) | 0 |
