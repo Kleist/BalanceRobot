@@ -112,6 +112,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [ ] Calibrate the gyro bias at startup
 - [ ] Pitch angle by integrating the gyro only (see the drift)
 - [ ] Burst-read the IMU (one I2C transaction per sample) so it keeps up with the control loop
+- [x] Complementary filter math in `balance-core` (`attitude::ComplementaryFilter`), unit tested
 - [ ] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
 - [ ] One motor, one direction, full speed (wheels off the ground)
 - [ ] Both directions, then PWM speed control via LEDC
