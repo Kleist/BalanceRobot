@@ -118,6 +118,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [ ] Both directions, then PWM speed control via LEDC
 - [ ] Both motors: verify directions, measure the PWM deadband
 - [ ] Battery voltage via ADC on GPIO4
+- [x] PID controller math in `balance-core` (`pid::Pid`: output limits, anti-windup, derivative on measurement), unit tested
 - [ ] P-only tilt loop, then add D, then I; tuning
 - [ ] BLE: advertise and show up on the phone
 - [ ] BLE GATT control (steering / setpoint) from Android

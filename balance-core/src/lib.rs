@@ -7,6 +7,7 @@
 
 pub mod attitude;
 pub mod gyro;
+pub mod pid;
 
 /// Limits a motor duty command to the valid range `-1.0..=1.0`.
 ///
