@@ -63,7 +63,7 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 ## Project layout & checks
 
 - `balance-core/` - all logic that doesn't touch hardware (filters, PID, motor mapping, battery math). `#![no_std]`, no hardware deps, unit-tested on the host. Put as much code here as possible.
-- `firmware/` (coming in step 3) - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target.
+- `firmware/` (coming next) - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target.
 - Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests). CI treats warnings as errors.
 - Toolchain is pinned in `rust-toolchain.toml`.
 - Coverage is **reported, not enforced**: CI posts a PR comment comparing base vs PR. Decide per PR whether a drop is acceptable.
@@ -89,28 +89,28 @@ cargo llvm-cov --workspace --open    # coverage report (cargo install cargo-llvm
 
 ## Bring-up plan
 
-Small steps, one PR each. Mark steps done as they are completed.
+Small steps, one PR each, in order. Tick steps off as they are completed; insert new steps anywhere.
 
-1. ~~Create this CLAUDE.md~~ (done)
-2. ~~CI + `balance-core` skeleton: fmt, clippy, unit tests, no_std check, docs, coverage report~~ (done)
-3. Minimal firmware crate (no Embassy yet) + full firmware build in CI; understand each file
-4. Install the toolchain and `espflash` locally, flash the skeleton
-5. See a "hello" log over USB-Serial-JTAG
-6. Blink the LED on GPIO7 (blocking delay)
-7. Same blink with Embassy (async task + timer)
-8. I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
-9. Read raw accelerometer values from the IMU and print them
-10. Pitch angle from the accelerometer only (see how noisy it is)
-11. Read the gyro, calibrate its bias at startup
-12. Pitch angle by integrating the gyro only (see the drift)
-13. Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
-14. One motor, one direction, full speed (wheels off the ground)
-15. Both directions, then PWM speed control via LEDC
-16. Both motors: verify directions, measure the PWM deadband
-17. Battery voltage via ADC on GPIO4
-18. P-only tilt loop, then add D, then I; tuning
-19. BLE: advertise and show up on the phone
-20. BLE GATT control (steering / setpoint) from Android
+- [x] Create this CLAUDE.md
+- [x] CI + `balance-core` skeleton: fmt, clippy, unit tests, no_std check, docs, coverage report
+- [ ] Minimal firmware crate (no Embassy yet) + full firmware build in CI; understand each file
+- [ ] Install the toolchain and `espflash` locally, flash the skeleton
+- [ ] See a "hello" log over USB-Serial-JTAG
+- [ ] Blink the LED on GPIO7 (blocking delay)
+- [ ] Same blink with Embassy (async task + timer)
+- [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
+- [ ] Read raw accelerometer values from the IMU and print them
+- [ ] Pitch angle from the accelerometer only (see how noisy it is)
+- [ ] Read the gyro, calibrate its bias at startup
+- [ ] Pitch angle by integrating the gyro only (see the drift)
+- [ ] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
+- [ ] One motor, one direction, full speed (wheels off the ground)
+- [ ] Both directions, then PWM speed control via LEDC
+- [ ] Both motors: verify directions, measure the PWM deadband
+- [ ] Battery voltage via ADC on GPIO4
+- [ ] P-only tilt loop, then add D, then I; tuning
+- [ ] BLE: advertise and show up on the phone
+- [ ] BLE GATT control (steering / setpoint) from Android
 
 ## Known limitations of the prototype
 
