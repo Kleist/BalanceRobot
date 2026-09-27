@@ -1,12 +1,18 @@
 //! Read raw accelerometer and gyro samples from the onboard ICM-42670-P and log them
 //! over USB-Serial-JTAG as CSV lines, ~100 per second, followed by the pitch angle
-//! computed from the accelerometer alone. The LED on GPIO7 toggles on
-//! every sample, so a steady glow/flicker means the loop is running.
+//! computed from the accelerometer alone and the bias-corrected gyro rates.
+//!
+//! At startup the gyro bias is calibrated while the robot stands still (LED on).
+//! After that the LED toggles on every sample, so a steady glow/flicker means the
+//! loop is running.
 
 #![no_std]
 #![no_main]
 
-use balance_core::attitude::accel_pitch_deg;
+use balance_core::{
+    attitude::accel_pitch_deg,
+    gyro::{BiasCalibrator, GyroBias},
+};
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{Level, Output, OutputConfig},
@@ -26,6 +32,23 @@ const ACCEL_RANGE: AccelRange = AccelRange::G4;
 /// ±500 °/s: fast enough for a falling robot, 65.5 LSB per °/s.
 const GYRO_RANGE: GyroRange = GyroRange::Deg500;
 const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+
+/// Gyro calibration: 200 samples at 100 Hz = 2 s of holding still.
+const CALIBRATION_SAMPLES: u32 = 200;
+/// Largest allowed max − min per axis during calibration, in °/s. The gyro's noise at
+/// rest is well below 1 °/s peak to peak; picking the robot up or bumping it gives
+/// several °/s, which rejects the calibration.
+const CALIBRATION_MAX_SPREAD_DPS: f32 = 2.0;
+
+/// Raw gyro LSB to °/s for the configured range.
+fn gyro_dps(g: I16x3) -> [f32; 3] {
+    let scale = GYRO_RANGE.scale_factor();
+    [
+        f32::from(g.x) / scale,
+        f32::from(g.y) / scale,
+        f32::from(g.z) / scale,
+    ]
+}
 
 /// Map the IMU's X/Y/Z to the robot's `(forward, up)`, including signs.
 ///
@@ -76,6 +99,29 @@ fn main() -> ! {
         halt(format_args!("IMU range setup failed: {e:?}"));
     }
 
+    // Gyro bias: average ~2 s of samples while the robot is still, and retry until the
+    // robot was still enough. The LED stays on while calibrating.
+    led.set_high();
+    let bias: GyroBias = loop {
+        println!("# calibrating gyro bias: keep the robot still...");
+        let mut calibrator = BiasCalibrator::new();
+        let mut next = Instant::now();
+        for _ in 0..CALIBRATION_SAMPLES {
+            next += SAMPLE_PERIOD;
+            match imu.gyro_raw() {
+                Ok(g) => calibrator.add(gyro_dps(g)),
+                Err(e) => println!("# gyro read failed: {e:?}"),
+            }
+            wait_until(next);
+        }
+        match calibrator.finish(CALIBRATION_SAMPLES, CALIBRATION_MAX_SPREAD_DPS) {
+            Ok(bias) => break bias,
+            Err(e) => println!("# gyro calibration rejected ({e:?}), retrying"),
+        }
+    };
+    let GyroBias([bx, by, bz]) = bias;
+    println!("# gyro bias (deg/s): x={bx:.3} y={by:.3} z={bz:.3}");
+
     // Header lines start with '#' so a CSV parser can skip them. Columns are right-aligned
     // to fixed widths (i16 needs 6 chars: "-32768") so the raw log is readable by eye;
     // the padding is only spaces, so it is still valid CSV.
@@ -85,8 +131,8 @@ fn main() -> ! {
         GYRO_RANGE.scale_factor()
     );
     println!(
-        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9}",
-        "t_us", "ax", "ay", "az", "gx", "gy", "gz", "pitch_deg"
+        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7}",
+        "t_us", "ax", "ay", "az", "gx", "gy", "gz", "pitch_deg", "gx_dps", "gy_dps", "gz_dps"
     );
 
     let mut next = Instant::now();
@@ -98,8 +144,9 @@ fn main() -> ! {
             (Ok(a), Ok(g)) => {
                 let (forward, up) = robot_axes(a);
                 let pitch = accel_pitch_deg(forward, up);
+                let [rx, ry, rz] = bias.apply(gyro_dps(g));
                 println!(
-                    "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1}",
+                    "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2}",
                     a.x, a.y, a.z, g.x, g.y, g.z
                 );
             }
