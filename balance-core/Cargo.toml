@@ -9,3 +9,7 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+# no_std has no atan2/sin/cos (std gets them from the OS C library); libm is a pure-Rust port.
+libm = { version = "0.2", default-features = false }
