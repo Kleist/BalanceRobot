@@ -121,6 +121,11 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [ ] Both motors: verify directions, measure the PWM deadband
 - [ ] Battery voltage via ADC on GPIO4
 - [x] PID controller math in `balance-core` (`pid::Pid`: output limits, anti-windup, derivative on measurement), unit tested
+- [ ] Simulation: host-only `sim/` crate (std, root workspace) with an inverted-pendulum-on-wheels physics model, no controller yet; unit test that an upright robot falls at the rate the physics predicts
+- [ ] Simulation: IMU sensor model (noise, bias, quantisation in the firmware's LSB units), output CSV in the firmware log format
+- [ ] Control step in `balance-core` (e.g. `Controller::step(imu_sample, dt) -> motor_cmd`) so firmware and simulator run the same code
+- [ ] Simulation: close the loop (complementary filter + PID at 500 Hz) and tune P, D, I in simulation
+- [ ] Simulation: motor model (PWM deadband, saturation, battery sag, gear backlash) and a "stays upright" test in CI; refine parameters with numbers measured on the robot
 - [ ] P-only tilt loop, then add D, then I; tuning
 - [ ] BLE: advertise and show up on the phone
 - [ ] BLE GATT control (steering / setpoint) from Android
