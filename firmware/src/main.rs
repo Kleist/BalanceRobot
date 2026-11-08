@@ -4,7 +4,8 @@
 //! alone (which drifts) and the complementary-filter pitch that combines both. The IMU is
 //! read at 500 Hz, the rate the control loop will run at, but only every
 //! `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable. Once a second a
-//! `# loop busy ...` line shows how much of the 2 ms period the loop needed.
+//! `# loop max us: ...` line shows how much of the 2 ms period the loop needed, and which
+//! part took how long.
 //!
 //! The `icm42670` driver only sets the chip up. After that each sample is one burst read
 //! of all 12 data bytes (see `read_imu`); the time both ways take is logged at startup.
@@ -257,6 +258,19 @@ fn robot_pitch_rate(rates_dps: [f32; 3]) -> f32 {
     rates_dps[1]
 }
 
+/// Longest time in µs, per part of the sample loop, since the last `# loop max` line.
+#[derive(Debug, Clone, Copy, Default)]
+struct LoopTimes {
+    /// The whole iteration, from the tick to just before waiting for the next one.
+    busy: u64,
+    imu: u64,
+    battery_adc: u64,
+    battery_print: u64,
+    csv_print: u64,
+    /// The `# loop max` println itself (measured after `busy`, so not included there).
+    stats_print: u64,
+}
+
 /// Reads accel + gyro in one I2C transaction: write the address of the first data
 /// register, then (after a repeated START, without releasing the bus) read 12 bytes.
 /// The chip steps through the registers by itself. Within one transaction it doesn't
@@ -350,7 +364,9 @@ async fn main(spawner: Spawner) {
     let mut battery_pin =
         adc_config.enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO4, Attenuation::_11dB);
     let mut adc = Adc::new(peripherals.ADC1, adc_config);
-    let mut log_battery = || {
+    // Returns `(battery_v, pin_mv)`; printing is left to the caller, so the loop can time
+    // the ADC and the println separately.
+    let mut read_battery = || {
         let mut sum: u32 = 0;
         for _ in 0..BATTERY_AVERAGE {
             // `read_oneshot` doesn't wait: it starts a conversion and returns `WouldBlock`
@@ -364,10 +380,10 @@ async fn main(spawner: Spawner) {
         }
         // The mean of u16 values always fits in a u16.
         let pin_mv = u16::try_from(sum / BATTERY_AVERAGE).unwrap_or(u16::MAX);
-        let battery_v = BATTERY_DIVIDER.battery_v(pin_mv);
-        println!("# battery {battery_v:.2} V (pin {pin_mv} mV)");
+        (BATTERY_DIVIDER.battery_v(pin_mv), pin_mv)
     };
-    log_battery();
+    let (battery_v, pin_mv) = read_battery();
+    println!("# battery {battery_v:.2} V (pin {pin_mv} mV)");
 
     // The board wires the IMU (and the SHTC3) to SDA = GPIO10, SCL = GPIO8, with pull-ups.
     // 400 kHz "fast mode": at 500 Hz later, every µs of bus time counts.
@@ -465,8 +481,8 @@ async fn main(spawner: Spawner) {
     // ever adds up rate × dt. Any leftover bias adds up too, so this drifts.
     let mut gyro_pitch: Option<f32> = None;
     let mut filter = ComplementaryFilter::new(FILTER_TAU_S);
-    // Longest time one loop iteration took since the last `# loop busy` line.
-    let mut busy_max_us: u64 = 0;
+    // Longest times since the last `# loop max` line: the whole iteration and its parts.
+    let mut times = LoopTimes::default();
 
     let mut ticker = Ticker::every(SAMPLE_PERIOD);
     let mut sample: u32 = 0;
@@ -476,7 +492,12 @@ async fn main(spawner: Spawner) {
         sample = sample.wrapping_add(1);
 
         if sample.is_multiple_of(BATTERY_LOG_EVERY_N_SAMPLES) {
-            log_battery();
+            let start = Instant::now();
+            let (battery_v, pin_mv) = read_battery();
+            times.battery_adc = times.battery_adc.max(start.elapsed().as_micros());
+            let start = Instant::now();
+            println!("# battery {battery_v:.2} V (pin {pin_mv} mV)");
+            times.battery_print = times.battery_print.max(start.elapsed().as_micros());
         }
 
         let step = if MOTOR_TEST_ENABLED {
@@ -512,7 +533,10 @@ async fn main(spawner: Spawner) {
 
         // Read every sample even when it isn't logged: later steps feed each one into the
         // filter and the control loop. Read errors are always logged.
-        match read_imu(&mut i2c) {
+        let start = Instant::now();
+        let imu_result = read_imu(&mut i2c);
+        times.imu = times.imu.max(start.elapsed().as_micros());
+        match imu_result {
             Ok(RawSample { accel: a, gyro: g }) => {
                 let (forward, up) = robot_axes(a);
                 let pitch = accel_pitch_deg(forward, up);
@@ -524,10 +548,12 @@ async fn main(spawner: Spawner) {
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
                     let [rx, ry, rz] = rates;
+                    let start = Instant::now();
                     println!(
                         "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{filter_pitch:>16.1}",
                         a[0], a[1], a[2], g[0], g[1], g[2], *gyro_pitch
                     );
+                    times.csv_print = times.csv_print.max(start.elapsed().as_micros());
                 }
             }
             Err(e) => println!("# IMU read failed: {e:?}"),
@@ -535,13 +561,27 @@ async fn main(spawner: Spawner) {
 
         // Everything above has to fit into one SAMPLE_PERIOD. If it doesn't, the Ticker
         // fires again immediately and the loop falls behind its schedule.
-        busy_max_us = busy_max_us.max(tick.elapsed().as_micros());
+        times.busy = times.busy.max(tick.elapsed().as_micros());
         if sample.is_multiple_of(LOOP_STATS_EVERY_N_SAMPLES) {
+            // This println also takes time, after `busy` was measured; it's reported as
+            // `stats print` in the next line.
+            let start = Instant::now();
+            let LoopTimes {
+                busy,
+                imu,
+                battery_adc,
+                battery_print,
+                csv_print,
+                stats_print,
+            } = times;
             println!(
-                "# loop busy max {busy_max_us} us of {} us",
+                "# loop max us: busy {busy} of {}, imu {imu}, battery adc {battery_adc}, battery print {battery_print}, csv print {csv_print}, stats print {stats_print}",
                 SAMPLE_PERIOD.as_micros()
             );
-            busy_max_us = 0;
+            times = LoopTimes {
+                stats_print: start.elapsed().as_micros(),
+                ..LoopTimes::default()
+            };
         }
 
         // Wait for the next tick. While main waits here, the executor runs other tasks.
