@@ -7,9 +7,10 @@
 //! After that the LED toggles on every sample, so a steady glow/flicker means the
 //! loop is running.
 //!
-//! Motor test, after calibration, repeating: each motor in turn runs at full speed
-//! forward, then backward, 2 s each, with a 2 s stop in between (see `MOTOR_TEST`).
-//! `# motor ...` lines in the log mark each phase. Keep the wheels off the ground.
+//! Motor test, after calibration: each motor in turn ramps up forward, then backward, in
+//! PWM steps of 10 % (0.5 s each), with a 1 s stop after each ramp (see `motor_test_step`).
+//! The whole sequence runs twice, then both motors stay off while the IMU log goes on.
+//! `# motor ...` lines in the log mark each step. Keep the wheels off the ground.
 
 #![no_std]
 #![no_main]
@@ -20,8 +21,13 @@ use balance_core::{
 };
 use esp_backtrace as _;
 use esp_hal::{
-    gpio::{Level, Output, OutputConfig, OutputPin},
+    gpio::{AnyPin, DriveMode, Level, Output, OutputConfig, OutputPin},
     i2c::master::{Config as I2cConfig, I2c},
+    ledc::{
+        LSGlobalClkSource, Ledc, LowSpeed,
+        channel::{self, Channel, ChannelIFace},
+        timer::{self, TimerIFace},
+    },
     main,
     time::{Duration, Instant, Rate},
 };
@@ -50,10 +56,30 @@ const CALIBRATION_SAMPLES: u32 = 200;
 /// Tighten this once the IMU is burst-read.
 const CALIBRATION_MAX_SPREAD_DPS: f32 = 5.0;
 
-/// Motor test: how long each phase of `MOTOR_TEST` lasts.
-const MOTOR_TEST_PHASE_MS: u64 = 2000;
+/// PWM frequency for the L298N enable pins. 1 kHz is a compromise: the L298N switches
+/// slowly (a few µs per edge), so at low frequencies those edges are a small part of
+/// the period and even small duty cycles come out clean. The price is an audible whine.
+/// Revisit once the deadband has been measured.
+const MOTOR_PWM_FREQUENCY: Rate = Rate::from_khz(1);
 
-#[derive(Debug, Clone, Copy)]
+/// Motor test: how long each speed step lasts.
+const MOTOR_TEST_STEP_MS: u64 = 500;
+/// Duty steps per ramp: 10 %, 20 %, ..., 100 %.
+const MOTOR_TEST_DUTY_STEPS: u64 = 10;
+/// Stopped steps after each ramp. The stop means a motor never reverses at speed, which
+/// would draw a large current spike and could brown out the battery.
+const MOTOR_TEST_STOP_STEPS: u64 = 2;
+/// The ramps in one pass of the test.
+const MOTOR_TEST_RAMPS: [(Side, Direction); 4] = [
+    (Side::Left, Direction::Forward),
+    (Side::Left, Direction::Backward),
+    (Side::Right, Direction::Forward),
+    (Side::Right, Direction::Backward),
+];
+/// Passes through `MOTOR_TEST_RAMPS` before the test ends and the motors stay off.
+const MOTOR_TEST_PASSES: u64 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
     Left,
     Right,
@@ -62,50 +88,69 @@ enum Side {
 /// "Forward" is just IN1 high / IN2 low (IN3 / IN4 for the right motor). Whether that
 /// drives the robot forward depends on how each motor is wired to the OUT pins: check it
 /// on the robot and swap the motor wires if needed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
     Forward,
     Backward,
 }
 
-/// Motor test sequence, one phase per `MOTOR_TEST_PHASE_MS`, repeating. `None` = both
-/// motors stopped. The stop between runs means a motor never reverses at full speed,
-/// which would draw a large current spike and could brown out the battery.
-const MOTOR_TEST: [Option<(Side, Direction)>; 8] = [
-    Some((Side::Left, Direction::Forward)),
-    None,
-    Some((Side::Left, Direction::Backward)),
-    None,
-    Some((Side::Right, Direction::Forward)),
-    None,
-    Some((Side::Right, Direction::Backward)),
-    None,
-];
+/// What the motor test does during one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestStep {
+    /// Run one motor in one direction at this duty cycle (percent); the other is off.
+    Run(Side, Direction, u8),
+    /// Both motors off, between ramps.
+    Stop,
+    /// The test is over: both motors off for good.
+    Done,
+}
 
-/// One L298N channel: EN switches the channel's outputs on (full speed, no PWM yet),
-/// the two IN pins pick the direction.
+/// The motor test as a function of the step number (one step per `MOTOR_TEST_STEP_MS`).
+fn motor_test_step(step: u64) -> TestStep {
+    let steps_per_ramp = MOTOR_TEST_DUTY_STEPS + MOTOR_TEST_STOP_STEPS;
+    let ramps_per_pass = MOTOR_TEST_RAMPS.len() as u64;
+    let ramp = step / steps_per_ramp;
+    if ramp >= ramps_per_pass * MOTOR_TEST_PASSES {
+        return TestStep::Done;
+    }
+    let within_ramp = step % steps_per_ramp;
+    if within_ramp >= MOTOR_TEST_DUTY_STEPS {
+        return TestStep::Stop;
+    }
+    // Both conversions are of small numbers (< 4 and <= 100), so they can't fail.
+    let (side, direction) = usize::try_from(ramp % ramps_per_pass)
+        .ok()
+        .and_then(|i| MOTOR_TEST_RAMPS.get(i).copied())
+        .unwrap_or((Side::Left, Direction::Forward));
+    let duty_pct = u8::try_from((within_ramp + 1) * 100 / MOTOR_TEST_DUTY_STEPS).unwrap_or(0);
+    TestStep::Run(side, direction, duty_pct)
+}
+
+/// One L298N channel: PWM on EN sets the speed (the duty cycle is the fraction of time
+/// the outputs are on), the two IN pins pick the direction.
 struct Motor<'d> {
-    en: Output<'d>,
+    en: Channel<'d, LowSpeed>,
     in_a: Output<'d>,
     in_b: Output<'d>,
 }
 
 impl Motor<'_> {
-    fn run(&mut self, direction: Direction) {
+    fn run(&mut self, direction: Direction, duty_pct: u8) -> Result<(), channel::Error> {
         // Switch off while changing the IN pins, so the outputs never see a half-changed
         // combination.
-        self.en.set_low();
-        let forward = matches!(direction, Direction::Forward);
+        self.en.set_duty(0)?;
+        let forward = direction == Direction::Forward;
         self.in_a.set_level(Level::from(forward));
         self.in_b.set_level(Level::from(!forward));
-        self.en.set_high();
+        self.en.set_duty(duty_pct)
     }
 
     /// EN low: both outputs off, the motor coasts to a stop.
-    fn stop(&mut self) {
-        self.en.set_low();
+    fn stop(&mut self) -> Result<(), channel::Error> {
+        self.en.set_duty(0)?;
         self.in_a.set_low();
         self.in_b.set_low();
+        Ok(())
     }
 }
 
@@ -152,15 +197,53 @@ fn main() -> ! {
 
     // L298N inputs: drive all of them low first thing. Until this point they float, and a
     // floating EN that happens to read high while its IN pins differ spins the motor.
+    let left_in = (output_low(peripherals.GPIO1), output_low(peripherals.GPIO3));
+    let right_in = (
+        output_low(peripherals.GPIO20),
+        output_low(peripherals.GPIO21),
+    );
+
+    // PWM on the enable pins with the LEDC peripheral. A LEDC *timer* is a counter that
+    // sets the frequency and the duty resolution; each *channel* compares that counter
+    // with its own duty value and drives one pin. Both motors share one timer.
+    // 10-bit duty: 1024 steps, plenty for 1 % steps (80 MHz / (1 kHz * 1024) ≈ 78 is a
+    // valid clock divider).
+    let mut ledc = Ledc::new(peripherals.LEDC);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+    let mut pwm_timer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
+    if let Err(e) = pwm_timer.configure(timer::config::Config {
+        duty: timer::config::Duty::Duty10Bit,
+        clock_source: timer::LSClockSource::APBClk,
+        frequency: MOTOR_PWM_FREQUENCY,
+    }) {
+        halt(format_args!("PWM timer setup failed: {e:?}"));
+    }
+    let pwm_channel = |number, pin: AnyPin<'static>| {
+        let mut channel = ledc.channel::<LowSpeed>(number, pin);
+        channel
+            .configure(channel::config::Config {
+                timer: &pwm_timer,
+                duty_pct: 0,
+                drive_mode: DriveMode::PushPull,
+            })
+            .map(|()| channel)
+    };
+    let (ena, enb) = match (
+        pwm_channel(channel::Number::Channel0, peripherals.GPIO0.into()),
+        pwm_channel(channel::Number::Channel1, peripherals.GPIO6.into()),
+    ) {
+        (Ok(ena), Ok(enb)) => (ena, enb),
+        (Err(e), _) | (_, Err(e)) => halt(format_args!("PWM channel setup failed: {e:?}")),
+    };
     let mut left = Motor {
-        en: output_low(peripherals.GPIO0),
-        in_a: output_low(peripherals.GPIO1),
-        in_b: output_low(peripherals.GPIO3),
+        en: ena,
+        in_a: left_in.0,
+        in_b: left_in.1,
     };
     let mut right = Motor {
-        en: output_low(peripherals.GPIO6),
-        in_a: output_low(peripherals.GPIO20),
-        in_b: output_low(peripherals.GPIO21),
+        en: enb,
+        in_a: right_in.0,
+        in_b: right_in.1,
     };
 
     let mut led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
@@ -224,7 +307,7 @@ fn main() -> ! {
     );
 
     let motor_test_start = Instant::now();
-    let mut motor_phase = None;
+    let mut motor_step = None;
 
     let mut next = Instant::now();
     let mut sample: u32 = 0;
@@ -233,21 +316,28 @@ fn main() -> ! {
         // Wraps after ~500 days at 100 Hz; the only effect is one irregular log gap.
         sample = sample.wrapping_add(1);
 
-        let phases = motor_test_start.elapsed().as_millis() / MOTOR_TEST_PHASE_MS;
-        // The remainder is < 8, so the conversion can't fail.
-        let phase = usize::try_from(phases % MOTOR_TEST.len() as u64).unwrap_or(0);
-        if motor_phase != Some(phase) {
-            motor_phase = Some(phase);
-            left.stop();
-            right.stop();
-            if let Some((side, direction)) = MOTOR_TEST[phase] {
-                match side {
-                    Side::Left => left.run(direction),
-                    Side::Right => right.run(direction),
+        let step = motor_test_step(motor_test_start.elapsed().as_millis() / MOTOR_TEST_STEP_MS);
+        if motor_step != Some(step) {
+            motor_step = Some(step);
+            let result = match step {
+                TestStep::Run(side, direction, duty_pct) => {
+                    println!("# motor {side:?} {direction:?} {duty_pct}%");
+                    match side {
+                        Side::Left => left.run(direction, duty_pct),
+                        Side::Right => right.run(direction, duty_pct),
+                    }
                 }
-                println!("# motor {side:?} {direction:?}");
-            } else {
-                println!("# motor stop");
+                TestStep::Stop | TestStep::Done => {
+                    if step == TestStep::Done {
+                        println!("# motor test done, motors off");
+                    } else {
+                        println!("# motor stop");
+                    }
+                    left.stop().and_then(|()| right.stop())
+                }
+            };
+            if let Err(e) = result {
+                println!("# motor command failed: {e:?}");
             }
         }
 
