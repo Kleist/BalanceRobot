@@ -91,7 +91,7 @@ cargo build --release
 - `esp-hal` + Embassy (no_std), async
 - LEDC for motor PWM on both channels (needs esp-hal's `unstable` feature; the C3 has no MCPWM). 1 kHz, 10-bit. Measured deadband in "Known limitations" below
 - `icm42670` crate for the onboard IMU (embedded-hal), used only for setup (WHO_AM_I, power, ranges): v0.2 reads each register byte in its own I2C transaction, which is slow and tears values. After setup the firmware takes the bus back (`free()`) and burst-reads all 12 data bytes from 0x0B in one transaction; decoding is `balance_core::imu::RawSample`
-- IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps,gyro_pitch_deg`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s, then the pitch from integrating the gyro alone (starts at the accel pitch, drifts). Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
+- IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps,gyro_pitch_deg,filter_pitch_deg`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s, then the pitch from integrating the gyro alone (starts at the accel pitch, drifts), then the complementary-filter pitch. Sampled at 500 Hz, logged at 10 lines/s; `# loop busy max N us of 2000 us` once a second. Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
 - The onboard IMU interrupt is probably not broken out: drive the control loop from an Embassy ticker at ~500 Hz and poll the IMU
 - BLE later. **ESP32-C3 is BLE only (no Classic BT / SPP)**, so the Android app must use GATT
 
@@ -115,7 +115,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Pitch angle by integrating the gyro only (see the drift): ~0.4 °/min at rest after calibration
 - [x] Burst-read the IMU (one I2C transaction per sample) so it keeps up with the control loop
 - [x] Complementary filter math in `balance-core` (`attitude::ComplementaryFilter`), unit tested
-- [ ] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
+- [x] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
 - [x] One motor, one direction, full speed (wheels off the ground)
 - [x] Both motors, both directions, full speed (no PWM yet)
 - [x] PWM speed control via LEDC

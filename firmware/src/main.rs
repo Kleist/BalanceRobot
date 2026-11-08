@@ -1,8 +1,10 @@
 //! Read raw accelerometer and gyro samples from the onboard ICM-42670-P and log them
 //! over USB-Serial-JTAG as CSV lines, followed by the pitch angle computed from the
-//! accelerometer alone, the bias-corrected gyro rates and the pitch from integrating the
-//! gyro alone (which drifts: compare it with the accelerometer pitch over a few minutes). The IMU is read at 100 Hz, but
-//! only every `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable.
+//! accelerometer alone, the bias-corrected gyro rates, the pitch from integrating the gyro
+//! alone (which drifts) and the complementary-filter pitch that combines both. The IMU is
+//! read at 500 Hz, the rate the control loop will run at, but only every
+//! `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable. Once a second a
+//! `# loop busy ...` line shows how much of the 2 ms period the loop needed.
 //!
 //! The `icm42670` driver only sets the chip up. After that each sample is one burst read
 //! of all 12 data bytes (see `read_imu`); the time both ways take is logged at startup.
@@ -29,7 +31,7 @@
 #![no_main]
 
 use balance_core::{
-    attitude::accel_pitch_deg,
+    attitude::{ComplementaryFilter, accel_pitch_deg},
     battery::Divider,
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
@@ -51,7 +53,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_println::println;
-use icm42670::{AccelRange, Address, GyroRange, Icm42670, prelude::*};
+use icm42670::{AccelOdr, AccelRange, Address, GyroOdr, GyroRange, Icm42670, prelude::*};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -61,12 +63,24 @@ const ACCEL_RANGE: AccelRange = AccelRange::G4;
 const GYRO_RANGE: GyroRange = GyroRange::Deg500;
 /// I2C address of the onboard ICM-42670-P (AD0 tied low).
 const IMU_ADDRESS: u8 = 0x68;
-const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+/// The IMU measures at 1.6 kHz, faster than we read it (500 Hz), so every read gets a
+/// fresh sample at most 0.6 ms old. 1.6 kHz needs low-noise mode, which the driver
+/// switches on.
+const ACCEL_ODR: AccelOdr = AccelOdr::Hz1600;
+const GYRO_ODR: GyroOdr = GyroOdr::Hz1600;
+/// 500 Hz: the rate the balance control loop will run at. Fast enough to catch a falling
+/// robot early, slow enough to leave time for I2C, maths and logging in each period.
+const SAMPLE_PERIOD: Duration = Duration::from_micros(2000);
 /// `SAMPLE_PERIOD` in seconds, for integrating the gyro rate.
-const DT_S: f32 = 0.01;
-/// Log one CSV line per this many samples: 10 = 10 lines/s. Set to 1 to log every sample
-/// (e.g. to look at vibration or noise), or higher for an even quieter log.
-const LOG_EVERY_N_SAMPLES: u32 = 10;
+const DT_S: f32 = 0.002;
+/// Log one CSV line per this many samples: 50 = 10 lines/s. Set to 1 to log every sample
+/// (500 lines/s; probably more than the USB log keeps up with).
+const LOG_EVERY_N_SAMPLES: u32 = 50;
+/// Log the loop's busy time once per this many samples: 500 = once a second.
+const LOOP_STATS_EVERY_N_SAMPLES: u32 = 500;
+/// Complementary filter time constant: changes faster than this come from the gyro,
+/// slower ones from the accelerometer. 0.5 s is a common starting point; tune later.
+const FILTER_TAU_S: f32 = 0.5;
 
 /// Battery sense divider: battery + → 100 kΩ → GPIO4 → 33 kΩ → GND.
 const BATTERY_DIVIDER: Divider = Divider {
@@ -75,11 +89,11 @@ const BATTERY_DIVIDER: Divider = Divider {
 };
 /// ADC readings averaged per battery measurement, to smooth out ADC noise.
 const BATTERY_AVERAGE: u32 = 16;
-/// Log the battery voltage once per this many samples: 50 = every 0.5 s.
-const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 50;
+/// Log the battery voltage once per this many samples: 250 = every 0.5 s.
+const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 250;
 
-/// Gyro calibration: 200 samples at 100 Hz = 2 s of holding still.
-const CALIBRATION_SAMPLES: u32 = 200;
+/// Gyro calibration: 1000 samples at 500 Hz = 2 s of holding still.
+const CALIBRATION_SAMPLES: u32 = 1000;
 /// Largest allowed max − min per axis during calibration, in °/s. The gyro's noise at
 /// rest is about 0.5 °/s peak to peak; moving the robot gives tens of °/s, which rejects
 /// the calibration. (With per-register reads this had to be 5 °/s: an axis crossing zero
@@ -373,8 +387,15 @@ async fn main(spawner: Spawner) {
     if let Err(e) = imu
         .set_accel_range(ACCEL_RANGE)
         .and_then(|()| imu.set_gyro_range(GYRO_RANGE))
+        .and_then(|()| imu.set_accel_odr(ACCEL_ODR))
+        .and_then(|()| imu.set_gyro_odr(GYRO_ODR))
     {
-        halt(format_args!("IMU range setup failed: {e:?}")).await;
+        halt(format_args!("IMU range/ODR setup failed: {e:?}")).await;
+    }
+    // Read the rates back, to see that the chip took them.
+    match (imu.accel_odr(), imu.gyro_odr()) {
+        (Ok(accel), Ok(gyro)) => println!("# IMU output data rate: accel {accel:?}, gyro {gyro:?}"),
+        (Err(e), _) | (_, Err(e)) => println!("# IMU ODR read-back failed: {e:?}"),
     }
 
     // Compare once: the driver's reads (one I2C transaction per byte, 12 per sample) with
@@ -422,7 +443,7 @@ async fn main(spawner: Spawner) {
         GYRO_RANGE.scale_factor()
     );
     println!(
-        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14}",
+        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16}",
         "t_us",
         "ax",
         "ay",
@@ -434,7 +455,8 @@ async fn main(spawner: Spawner) {
         "gx_dps",
         "gy_dps",
         "gz_dps",
-        "gyro_pitch_deg"
+        "gyro_pitch_deg",
+        "filter_pitch_deg"
     );
 
     let motor_test_start = Instant::now();
@@ -442,11 +464,15 @@ async fn main(spawner: Spawner) {
     // Gyro-only pitch: starts at the accelerometer pitch of the first sample, then only
     // ever adds up rate × dt. Any leftover bias adds up too, so this drifts.
     let mut gyro_pitch: Option<f32> = None;
+    let mut filter = ComplementaryFilter::new(FILTER_TAU_S);
+    // Longest time one loop iteration took since the last `# loop busy` line.
+    let mut busy_max_us: u64 = 0;
 
     let mut ticker = Ticker::every(SAMPLE_PERIOD);
     let mut sample: u32 = 0;
     loop {
-        // Wraps after ~500 days at 100 Hz; the only effect is one irregular log gap.
+        let tick = Instant::now();
+        // Wraps after ~100 days at 500 Hz; the only effect is one irregular log gap.
         sample = sample.wrapping_add(1);
 
         if sample.is_multiple_of(BATTERY_LOG_EVERY_N_SAMPLES) {
@@ -493,17 +519,29 @@ async fn main(spawner: Spawner) {
                 let rates = bias.apply(gyro_dps(g));
                 let gyro_pitch = gyro_pitch.get_or_insert(pitch);
                 *gyro_pitch += robot_pitch_rate(rates) * DT_S;
+                let filter_pitch = filter.update(pitch, robot_pitch_rate(rates), DT_S);
 
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
                     let [rx, ry, rz] = rates;
                     println!(
-                        "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1}",
+                        "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{filter_pitch:>16.1}",
                         a[0], a[1], a[2], g[0], g[1], g[2], *gyro_pitch
                     );
                 }
             }
             Err(e) => println!("# IMU read failed: {e:?}"),
+        }
+
+        // Everything above has to fit into one SAMPLE_PERIOD. If it doesn't, the Ticker
+        // fires again immediately and the loop falls behind its schedule.
+        busy_max_us = busy_max_us.max(tick.elapsed().as_micros());
+        if sample.is_multiple_of(LOOP_STATS_EVERY_N_SAMPLES) {
+            println!(
+                "# loop busy max {busy_max_us} us of {} us",
+                SAMPLE_PERIOD.as_micros()
+            );
+            busy_max_us = 0;
         }
 
         // Wait for the next tick. While main waits here, the executor runs other tasks.
