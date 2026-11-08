@@ -15,14 +15,23 @@
 //! calibration and correction use the same unit.
 
 /// Why a calibration was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CalibrationError {
     /// Fewer samples than requested: the average would be too noisy.
     TooFewSamples,
     /// The readings on some axis spread more than allowed, so the robot was
     /// probably moved. The average would then include real rotation, not
-    /// just the bias, so the result can't be trusted.
-    Moved,
+    /// just the bias, so the result can't be trusted. Reports the first
+    /// such axis (0 = x, 1 = y, 2 = z) and its smallest and largest reading,
+    /// so a rejection can be told apart from a single glitch.
+    Moved {
+        /// Index of the axis that spread too much.
+        axis: usize,
+        /// Smallest reading on that axis.
+        min: f32,
+        /// Largest reading on that axis.
+        max: f32,
+    },
 }
 
 /// Collects gyro samples taken while the robot is still, to estimate the
@@ -78,8 +87,9 @@ impl BiasCalibrator {
             return Err(CalibrationError::TooFewSamples);
         }
         for axis in 0..3 {
-            if self.max[axis] - self.min[axis] > max_spread {
-                return Err(CalibrationError::Moved);
+            let (min, max) = (self.min[axis], self.max[axis]);
+            if max - min > max_spread {
+                return Err(CalibrationError::Moved { axis, min, max });
             }
         }
         #[allow(
@@ -171,7 +181,13 @@ mod tests {
         let mut samples = still_samples([0.3, -0.7, 1.1]);
         samples[50][1] += 20.0; // someone bumped the robot
         let cal = calibrate(&samples);
-        assert_eq!(cal.finish(100, 0.5), Err(CalibrationError::Moved));
+        assert!(
+            matches!(
+                cal.finish(100, 0.5),
+                Err(CalibrationError::Moved { axis: 1, max, .. }) if max > 19.0
+            ),
+            "expected a spike on axis 1"
+        );
     }
 
     #[test]
