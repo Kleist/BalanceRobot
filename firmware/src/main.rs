@@ -1,6 +1,7 @@
 //! Read raw accelerometer and gyro samples from the onboard ICM-42670-P and log them
-//! over USB-Serial-JTAG as CSV lines, ~100 per second, followed by the pitch angle
-//! computed from the accelerometer alone and the bias-corrected gyro rates.
+//! over USB-Serial-JTAG as CSV lines, followed by the pitch angle computed from the
+//! accelerometer alone and the bias-corrected gyro rates. The IMU is read at 100 Hz, but
+//! only every `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable.
 //!
 //! At startup the gyro bias is calibrated while the robot stands still (LED on).
 //! After that the LED toggles on every sample, so a steady glow/flicker means the
@@ -36,6 +37,9 @@ const ACCEL_RANGE: AccelRange = AccelRange::G4;
 /// ±500 °/s: fast enough for a falling robot, 65.5 LSB per °/s.
 const GYRO_RANGE: GyroRange = GyroRange::Deg500;
 const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+/// Log one CSV line per this many samples: 10 = 10 lines/s. Set to 1 to log every sample
+/// (e.g. to look at vibration or noise), or higher for an even quieter log.
+const LOG_EVERY_N_SAMPLES: u32 = 10;
 
 /// Gyro calibration: 200 samples at 100 Hz = 2 s of holding still.
 const CALIBRATION_SAMPLES: u32 = 200;
@@ -163,8 +167,11 @@ fn main() -> ! {
     let mut motor_on = false;
 
     let mut next = Instant::now();
+    let mut sample: u32 = 0;
     loop {
         next += SAMPLE_PERIOD;
+        // Wraps after ~500 days at 100 Hz; the only effect is one irregular log gap.
+        sample = sample.wrapping_add(1);
 
         let half_periods = motor_test_start.elapsed().as_millis() / MOTOR_TEST_HALF_PERIOD_MS;
         let want_on = half_periods.is_multiple_of(2);
@@ -181,8 +188,10 @@ fn main() -> ! {
 
         let t_us = Instant::now().duration_since_epoch().as_micros();
 
+        // Read every sample even when it isn't logged: later steps feed each one into the
+        // filter and the control loop. Read errors are always logged.
         match (imu.accel_raw(), imu.gyro_raw()) {
-            (Ok(a), Ok(g)) => {
+            (Ok(a), Ok(g)) if sample.is_multiple_of(LOG_EVERY_N_SAMPLES) => {
                 let (forward, up) = robot_axes(a);
                 let pitch = accel_pitch_deg(forward, up);
                 let [rx, ry, rz] = bias.apply(gyro_dps(g));
@@ -191,6 +200,7 @@ fn main() -> ! {
                     a.x, a.y, a.z, g.x, g.y, g.z
                 );
             }
+            (Ok(_), Ok(_)) => {}
             (Err(e), _) => println!("# accel read failed: {e:?}"),
             (_, Err(e)) => println!("# gyro read failed: {e:?}"),
         }
