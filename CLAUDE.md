@@ -117,8 +117,9 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Complementary filter math in `balance-core` (`attitude::ComplementaryFilter`), unit tested
 - [ ] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
 - [x] One motor, one direction, full speed (wheels off the ground)
-- [ ] Both directions, then PWM speed control via LEDC
-- [ ] Both motors: verify directions, measure the PWM deadband
+- [x] Both motors, both directions, full speed (no PWM yet)
+- [ ] PWM speed control via LEDC
+- [ ] Measure the PWM deadband of both motors
 - [ ] Battery voltage via ADC on GPIO4
 - [x] PID controller math in `balance-core` (`pid::Pid`: output limits, anti-windup, derivative on measurement), unit tested
 - [ ] Simulation: host-only `sim/` crate (std, root workspace) with an inverted-pendulum-on-wheels physics model, no controller yet; unit test that an upright robot falls at the rate the physics predicts
