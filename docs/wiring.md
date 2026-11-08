@@ -44,6 +44,8 @@ connected; record it in the table below.
 | ESP32-C3 GPIO1 | L298N IN1 | Left motor direction | ✅ | |
 | ESP32-C3 GPIO3 | L298N IN2 | Left motor direction | ✅ | |
 | ESP32-C3 GPIO6 | L298N ENB | Right motor PWM (LEDC) | ✅ | ENB jumper removed; must stay low during boot (see below) |
+| L298N ENA → 10 kΩ → GND | L298N ENA | Pull-down: motor A off while the pins float | ⬜ | Fixes the small twitch of the left motor at reset / flashing (see below) |
+| L298N ENB → 10 kΩ → GND | L298N ENB | Pull-down: motor B off while the pins float | ⬜ | Same for the right motor; also covers IN4 toggling at reset |
 | ESP32-C3 GPIO20 | L298N IN3 | Right motor direction | ✅ | UART0 RX: never log over UART0 |
 | ESP32-C3 GPIO21 | L298N IN4 | Right motor direction | ✅ | UART0 TX: the ROM bootloader toggles it at reset |
 | ESP32-C3 GND | L298N GND | Common ground | ✅ | GND only, not 5 V, while the board runs on USB |
@@ -62,6 +64,14 @@ connected; record it in the table below.
   they are free for IN3/IN4. The ROM bootloader still prints on GPIO21 at
   reset; that is harmless as long as ENB (GPIO6) stays low, so the right
   motor can't move while IN4 toggles.
+- **ENA/ENB need pull-downs.** From reset until the firmware drives the
+  pins (and during flashing), GPIO0/1/3/6/20/21 float. With the EN jumpers
+  removed nothing else holds EN, the L298N often reads a floating input as
+  high, and then a motor runs whenever its IN pins happen to differ: the left
+  motor twitches briefly at reset. Once the firmware runs this can't happen
+  (IN pins low = brake, whatever EN does). 10 kΩ to GND holds EN low in that
+  window and costs the ESP32 only 0.33 mA when it drives EN high. Not fitted
+  yet.
 - **The L298N logic inputs accept 3.3 V** (V_IH min 2.3 V), so no level
   shifters are needed.
 
