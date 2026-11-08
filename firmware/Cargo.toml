@@ -21,6 +21,12 @@ esp-rtos = { version = "0.4", features = ["esp32c3", "embassy"] }
 embassy-executor = "0.10"
 # Async `Timer` and `Ticker`.
 embassy-time = "0.5"
+# `Channel`: the queue from the sample loop to the log task.
+embassy-sync = "0.8"
+# Fixed-capacity `String` (no allocator in no_std) to format a log line into.
+heapless = "0.9"
+# The async `Write` trait (`write_all`) that esp-hal's USB-Serial-JTAG driver implements.
+embedded-io-async = "0.7"
 # Writes the app descriptor the ESP-IDF 2nd stage bootloader expects (espflash refuses images without it).
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32c3"] }
 # println! over the USB-Serial-JTAG only: never touch UART0 (GPIO20/21 are IN3/IN4 on the L298N).

@@ -4,8 +4,13 @@
 //! alone (which drifts) and the complementary-filter pitch that combines both. The IMU is
 //! read at 500 Hz, the rate the control loop will run at, but only every
 //! `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable. Once a second a
-//! `# loop max us: ...` line shows how much of the 2 ms period the loop needed, and which
-//! part took how long.
+//! `# loop max us: ...` line shows how much of the 2 ms period the loop needed, how late
+//! its ticks started, and which part took how long.
+//!
+//! The sample loop doesn't print: formatting and sending a line takes longer than a whole
+//! 2 ms period. It puts the raw numbers into the `LOG` queue instead (`LogMsg`), and the
+//! `log_writer` task formats them and sends them with the async USB-Serial-JTAG driver.
+//! Setup messages before the loop still use `println!`.
 //!
 //! The `icm42670` driver only sets the chip up. After that each sample is one burst read
 //! of all 12 data bytes (see `read_imu`); the time both ways take is logged at startup.
@@ -37,11 +42,15 @@ use balance_core::{
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
 };
+use core::fmt::Write as _;
+
 use embassy_executor::Spawner;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel as Queue};
 use embassy_time::{Duration, Instant, Ticker, Timer};
+use embedded_io_async::Write as _;
 use esp_backtrace as _;
 use esp_hal::{
-    Blocking,
+    Async, Blocking,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     gpio::{AnyPin, DriveMode, Level, Output, OutputConfig, OutputPin},
     i2c::master::{Config as I2cConfig, Error as I2cError, I2c},
@@ -52,6 +61,7 @@ use esp_hal::{
     },
     time::Rate,
     timer::timg::TimerGroup,
+    usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx},
 };
 use esp_println::println;
 use icm42670::{AccelOdr, AccelRange, Address, GyroOdr, GyroRange, Icm42670, prelude::*};
@@ -263,12 +273,84 @@ fn robot_pitch_rate(rates_dps: [f32; 3]) -> f32 {
 struct LoopTimes {
     /// The whole iteration, from the tick to just before waiting for the next one.
     busy: u64,
+    /// How long after its scheduled time an iteration started. Anything else running on
+    /// the CPU at the tick (the log task formatting a line) shows up here.
+    late: u64,
     imu: u64,
     battery_adc: u64,
-    battery_print: u64,
-    csv_print: u64,
-    /// The `# loop max` println itself (measured after `busy`, so not included there).
-    stats_print: u64,
+    /// Putting one message into the `LOG` queue.
+    log_send: u64,
+    /// Messages dropped because the `LOG` queue was full (a count, not a time).
+    dropped: u32,
+}
+
+/// What the sample loop hands to the log task: raw numbers only, because turning them
+/// into text is slow (the C3 has no FPU, so float formatting runs in software).
+enum LogMsg {
+    Sample {
+        t_us: u64,
+        raw: RawSample,
+        pitch: f32,
+        rates: [f32; 3],
+        gyro_pitch: f32,
+        filter_pitch: f32,
+    },
+    Battery {
+        battery_v: f32,
+        pin_mv: u16,
+    },
+    Times(LoopTimes),
+    Motor(TestStep),
+    MotorError(channel::Error),
+    ImuError(I2cError),
+}
+
+/// Queue from the sample loop to `log_writer`. A `static` because both tasks need it and
+/// tasks only take `'static` data. `CriticalSectionRawMutex` makes it safe to use from
+/// different executors and interrupt priorities (needed once the loop runs on its own,
+/// higher-priority executor). 8 messages ≈ half a second of logging.
+static LOG: Queue<CriticalSectionRawMutex, LogMsg, 8> = Queue::new();
+
+/// Formats one message as a log line (with newline) into `line`.
+fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Result {
+    match msg {
+        LogMsg::Sample {
+            t_us,
+            raw: RawSample { accel: a, gyro: g },
+            pitch,
+            rates: [rx, ry, rz],
+            gyro_pitch,
+            filter_pitch,
+        } => writeln!(
+            line,
+            "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1}",
+            a[0], a[1], a[2], g[0], g[1], g[2]
+        ),
+        LogMsg::Battery { battery_v, pin_mv } => {
+            writeln!(line, "# battery {battery_v:.2} V (pin {pin_mv} mV)")
+        }
+        LogMsg::Times(LoopTimes {
+            busy,
+            late,
+            imu,
+            battery_adc,
+            log_send,
+            dropped,
+        }) => writeln!(
+            line,
+            "# loop max us: busy {busy} of {}, late {late}, imu {imu}, battery adc {battery_adc}, log send {log_send}; dropped {dropped}",
+            SAMPLE_PERIOD.as_micros()
+        ),
+        LogMsg::Motor(TestStep::Run(side, direction, ramp, duty_pct)) => {
+            writeln!(line, "# motor {side:?} {direction:?} {ramp:?} {duty_pct}%")
+        }
+        LogMsg::Motor(TestStep::Stop) => writeln!(line, "# motor stop"),
+        LogMsg::Motor(TestStep::Done) => {
+            writeln!(line, "# motor test done (or disabled), motors off")
+        }
+        LogMsg::MotorError(e) => writeln!(line, "# motor command failed: {e:?}"),
+        LogMsg::ImuError(e) => writeln!(line, "# IMU read failed: {e:?}"),
+    }
 }
 
 /// Reads accel + gyro in one I2C transaction: write the address of the first data
@@ -483,11 +565,40 @@ async fn main(spawner: Spawner) {
     let mut filter = ComplementaryFilter::new(FILTER_TAU_S);
     // Longest times since the last `# loop max` line: the whole iteration and its parts.
     let mut times = LoopTimes::default();
+    // Never waits: if the log task has fallen behind and the queue is full, the message is
+    // dropped and counted. The loop's timing matters more than a complete log.
+    let log = |times: &mut LoopTimes, msg: LogMsg| {
+        let start = Instant::now();
+        if LOG.try_send(msg).is_err() {
+            times.dropped += 1;
+        }
+        times.log_send = times.log_send.max(start.elapsed().as_micros());
+    };
 
+    // From here on, log lines go through the queue to the log task, which owns the async
+    // USB-Serial-JTAG driver. (`println!` writes the same hardware directly; it is only
+    // used before this point and in `halt`.)
+    let (_, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
+        .into_async()
+        .split();
+    match log_writer(usb_tx) {
+        Ok(task) => spawner.spawn(task),
+        Err(e) => println!("# log task not started: {e:?}"),
+    }
+
+    let loop_start = Instant::now();
     let mut ticker = Ticker::every(SAMPLE_PERIOD);
+    // Iterations since `loop_start`; iteration n is due at `loop_start + n × SAMPLE_PERIOD`.
+    let mut iteration: u64 = 0;
     let mut sample: u32 = 0;
     loop {
         let tick = Instant::now();
+        let due = loop_start + Duration::from_micros(iteration * SAMPLE_PERIOD.as_micros());
+        iteration += 1;
+        let late = tick
+            .checked_duration_since(due)
+            .map_or(0, |d| d.as_micros());
+        times.late = times.late.max(late);
         // Wraps after ~100 days at 500 Hz; the only effect is one irregular log gap.
         sample = sample.wrapping_add(1);
 
@@ -495,9 +606,7 @@ async fn main(spawner: Spawner) {
             let start = Instant::now();
             let (battery_v, pin_mv) = read_battery();
             times.battery_adc = times.battery_adc.max(start.elapsed().as_micros());
-            let start = Instant::now();
-            println!("# battery {battery_v:.2} V (pin {pin_mv} mV)");
-            times.battery_print = times.battery_print.max(start.elapsed().as_micros());
+            log(&mut times, LogMsg::Battery { battery_v, pin_mv });
         }
 
         let step = if MOTOR_TEST_ENABLED {
@@ -507,25 +616,16 @@ async fn main(spawner: Spawner) {
         };
         if motor_step != Some(step) {
             motor_step = Some(step);
+            log(&mut times, LogMsg::Motor(step));
             let result = match step {
-                TestStep::Run(side, direction, ramp, duty_pct) => {
-                    println!("# motor {side:?} {direction:?} {ramp:?} {duty_pct}%");
-                    match side {
-                        Side::Left => left.run(direction, duty_pct),
-                        Side::Right => right.run(direction, duty_pct),
-                    }
-                }
-                TestStep::Stop | TestStep::Done => {
-                    if step == TestStep::Done {
-                        println!("# motor test done (or disabled), motors off");
-                    } else {
-                        println!("# motor stop");
-                    }
-                    left.stop().and_then(|()| right.stop())
-                }
+                TestStep::Run(side, direction, _, duty_pct) => match side {
+                    Side::Left => left.run(direction, duty_pct),
+                    Side::Right => right.run(direction, duty_pct),
+                },
+                TestStep::Stop | TestStep::Done => left.stop().and_then(|()| right.stop()),
             };
             if let Err(e) = result {
-                println!("# motor command failed: {e:?}");
+                log(&mut times, LogMsg::MotorError(e));
             }
         }
 
@@ -537,51 +637,37 @@ async fn main(spawner: Spawner) {
         let imu_result = read_imu(&mut i2c);
         times.imu = times.imu.max(start.elapsed().as_micros());
         match imu_result {
-            Ok(RawSample { accel: a, gyro: g }) => {
-                let (forward, up) = robot_axes(a);
+            Ok(raw) => {
+                let (forward, up) = robot_axes(raw.accel);
                 let pitch = accel_pitch_deg(forward, up);
-                let rates = bias.apply(gyro_dps(g));
+                let rates = bias.apply(gyro_dps(raw.gyro));
                 let gyro_pitch = gyro_pitch.get_or_insert(pitch);
                 *gyro_pitch += robot_pitch_rate(rates) * DT_S;
                 let filter_pitch = filter.update(pitch, robot_pitch_rate(rates), DT_S);
 
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
-                    let [rx, ry, rz] = rates;
-                    let start = Instant::now();
-                    println!(
-                        "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{filter_pitch:>16.1}",
-                        a[0], a[1], a[2], g[0], g[1], g[2], *gyro_pitch
-                    );
-                    times.csv_print = times.csv_print.max(start.elapsed().as_micros());
+                    let msg = LogMsg::Sample {
+                        t_us,
+                        raw,
+                        pitch,
+                        rates,
+                        gyro_pitch: *gyro_pitch,
+                        filter_pitch,
+                    };
+                    log(&mut times, msg);
                 }
             }
-            Err(e) => println!("# IMU read failed: {e:?}"),
+            Err(e) => log(&mut times, LogMsg::ImuError(e)),
         }
 
         // Everything above has to fit into one SAMPLE_PERIOD. If it doesn't, the Ticker
         // fires again immediately and the loop falls behind its schedule.
         times.busy = times.busy.max(tick.elapsed().as_micros());
         if sample.is_multiple_of(LOOP_STATS_EVERY_N_SAMPLES) {
-            // This println also takes time, after `busy` was measured; it's reported as
-            // `stats print` in the next line.
-            let start = Instant::now();
-            let LoopTimes {
-                busy,
-                imu,
-                battery_adc,
-                battery_print,
-                csv_print,
-                stats_print,
-            } = times;
-            println!(
-                "# loop max us: busy {busy} of {}, imu {imu}, battery adc {battery_adc}, battery print {battery_print}, csv print {csv_print}, stats print {stats_print}",
-                SAMPLE_PERIOD.as_micros()
-            );
-            times = LoopTimes {
-                stats_print: start.elapsed().as_micros(),
-                ..LoopTimes::default()
-            };
+            let report = times;
+            times = LoopTimes::default();
+            log(&mut times, LogMsg::Times(report));
         }
 
         // Wait for the next tick. While main waits here, the executor runs other tasks.
@@ -598,6 +684,24 @@ async fn blink(mut led: Output<'static>) {
     loop {
         led.toggle();
         Timer::after(Duration::from_millis(500)).await;
+    }
+}
+
+/// Takes log messages out of the `LOG` queue, formats them and sends them over USB.
+///
+/// `write_all` sends in 64-byte USB packets and `await`s while the host picks each one
+/// up, so the CPU is free for other tasks meanwhile. Formatting has no `.await`, though:
+/// while a line is being formatted, nothing else on this executor runs. Write errors are
+/// ignored, there is nowhere to report them.
+#[embassy_executor::task]
+async fn log_writer(mut usb: UsbSerialJtagTx<'static, Async>) {
+    let mut line = heapless::String::<192>::new();
+    loop {
+        let msg = LOG.receive().await;
+        line.clear();
+        // A line too long for the buffer comes out cut off; better than none.
+        let _ = format_msg(&mut line, &msg);
+        let _ = usb.write_all(line.as_bytes()).await;
     }
 }
 

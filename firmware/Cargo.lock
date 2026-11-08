@@ -45,12 +45,15 @@ version = "0.1.0"
 dependencies = [
  "balance-core",
  "embassy-executor",
+ "embassy-sync 0.8.0",
  "embassy-time",
+ "embedded-io-async 0.7.0",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "heapless 0.9.3",
  "icm42670",
 ]
 
