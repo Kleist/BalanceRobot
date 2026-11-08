@@ -5,6 +5,10 @@
 //! At startup the gyro bias is calibrated while the robot stands still (LED on).
 //! After that the LED toggles on every sample, so a steady glow/flicker means the
 //! loop is running.
+//!
+//! Motor test: the left motor (L298N channel A) runs at full speed in one direction for
+//! 2 s, then stops for 2 s, repeating. `# motor on` / `# motor off` lines in the log mark
+//! the switches. Keep the wheels off the ground.
 
 #![no_std]
 #![no_main]
@@ -42,6 +46,9 @@ const CALIBRATION_SAMPLES: u32 = 200;
 /// Tighten this once the IMU is burst-read.
 const CALIBRATION_MAX_SPREAD_DPS: f32 = 5.0;
 
+/// Motor test: on for this long, then off for this long.
+const MOTOR_TEST_HALF_PERIOD_MS: u64 = 2000;
+
 /// Raw gyro LSB to °/s for the configured range.
 fn gyro_dps(g: I16x3) -> [f32; 3] {
     let scale = GYRO_RANGE.scale_factor();
@@ -77,6 +84,18 @@ fn wait_until(deadline: Instant) {
 #[main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
+
+    // L298N inputs: drive all of them low first thing. Until this point they float, and a
+    // floating ENA that happens to read high while IN1 != IN2 spins the motor.
+    // EN low = both outputs of that channel off (the motor coasts), whatever IN1/IN2 are.
+    // The `_name` bindings keep the unused pins alive and low (a plain `_` would drop them).
+    let mut ena = Output::new(peripherals.GPIO0, Level::Low, OutputConfig::default());
+    let mut in1 = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+    let _in2 = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
+    let _enb = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
+    let _in3 = Output::new(peripherals.GPIO20, Level::Low, OutputConfig::default());
+    let _in4 = Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default());
+
     let mut led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
 
     // The board wires the IMU (and the SHTC3) to SDA = GPIO10, SCL = GPIO8, with pull-ups.
@@ -137,9 +156,29 @@ fn main() -> ! {
         "t_us", "ax", "ay", "az", "gx", "gy", "gz", "pitch_deg", "gx_dps", "gy_dps", "gz_dps"
     );
 
+    // Direction: IN1 high, IN2 low. Which way that turns the wheel depends on how the motor
+    // is wired to OUT1/OUT2. Speed is all or nothing for now: ENA high = full speed.
+    in1.set_high();
+    let motor_test_start = Instant::now();
+    let mut motor_on = false;
+
     let mut next = Instant::now();
     loop {
         next += SAMPLE_PERIOD;
+
+        let half_periods = motor_test_start.elapsed().as_millis() / MOTOR_TEST_HALF_PERIOD_MS;
+        let want_on = half_periods.is_multiple_of(2);
+        if want_on != motor_on {
+            motor_on = want_on;
+            if motor_on {
+                ena.set_high();
+                println!("# motor on");
+            } else {
+                ena.set_low();
+                println!("# motor off");
+            }
+        }
+
         let t_us = Instant::now().duration_since_epoch().as_micros();
 
         match (imu.accel_raw(), imu.gyro_raw()) {
