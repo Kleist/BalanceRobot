@@ -20,10 +20,13 @@
 //!
 //! At startup the gyro bias is calibrated while the robot stands still.
 //!
-//! Runs on the Embassy async executor: the LED on GPIO7 blinks once a second from its own
-//! task (`blink`), independent of the sample loop in `main`. Both share the one CPU core by
-//! `await`ing timers instead of busy-waiting, which gives the executor a chance to run the
-//! other task.
+//! Runs on two Embassy executors sharing the one CPU core:
+//! - the normal (thread-mode) executor runs `main` (setup and calibration), then the `blink`
+//!   task (LED on GPIO7, once a second) and the `log_writer` task. They take turns at each
+//!   `.await`.
+//! - an interrupt executor at priority 2 runs `control_loop`, the 500 Hz loop. It runs
+//!   inside an interrupt, so its tick preempts the thread-mode tasks even in the middle of
+//!   formatting a log line.
 //!
 //! Deadband test (off unless `MOTOR_TEST_ENABLED`), after calibration: each motor in turn,
 //! forward then backward, ramps the PWM duty up from 20 % to 50 % and back down to 10 % in
@@ -51,20 +54,24 @@ use embedded_io_async::Write as _;
 use esp_backtrace as _;
 use esp_hal::{
     Async, Blocking,
-    analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
+    analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
     gpio::{AnyPin, DriveMode, Level, Output, OutputConfig, OutputPin},
     i2c::master::{Config as I2cConfig, Error as I2cError, I2c},
+    interrupt::Priority,
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self, Channel, ChannelIFace},
         timer::{self, TimerIFace},
     },
+    peripherals::{ADC1, GPIO4, LEDC},
     time::Rate,
     timer::timg::TimerGroup,
     usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx},
 };
 use esp_println::println;
+use esp_rtos::embassy::InterruptExecutor;
 use icm42670::{AccelOdr, AccelRange, Address, GyroOdr, GyroRange, Icm42670, prelude::*};
+use static_cell::StaticCell;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -364,6 +371,32 @@ fn read_imu(i2c: &mut I2c<'_, Blocking>) -> Result<RawSample, I2cError> {
     Ok(RawSample::from_burst(&bytes))
 }
 
+/// The battery voltage divider's ADC input (GPIO4 on ADC1).
+struct Battery {
+    adc: Adc<'static, ADC1<'static>, Blocking>,
+    pin: AdcPin<GPIO4<'static>, ADC1<'static>, AdcCalCurve<ADC1<'static>>>,
+}
+
+impl Battery {
+    /// Averages `BATTERY_AVERAGE` readings; returns `(battery_v, pin_mv)`.
+    fn read(&mut self) -> (f32, u16) {
+        let mut sum: u32 = 0;
+        for _ in 0..BATTERY_AVERAGE {
+            // `read_oneshot` doesn't wait: it starts a conversion and returns `WouldBlock`
+            // until the result is ready (a few µs), so poll it.
+            let pin_mv = loop {
+                if let Ok(mv) = self.adc.read_oneshot(&mut self.pin) {
+                    break mv;
+                }
+            };
+            sum += u32::from(pin_mv);
+        }
+        // The mean of u16 values always fits in a u16.
+        let pin_mv = u16::try_from(sum / BATTERY_AVERAGE).unwrap_or(u16::MAX);
+        (BATTERY_DIVIDER.battery_v(pin_mv), pin_mv)
+    }
+}
+
 /// A push-pull output that starts low.
 fn output_low<'d>(pin: impl OutputPin + 'd) -> Output<'d> {
     Output::new(pin, Level::Low, OutputConfig::default())
@@ -373,7 +406,7 @@ fn output_low<'d>(pin: impl OutputPin + 'd) -> Output<'d> {
 /// `spawner` starts more tasks.
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    let peripherals = esp_hal::init(esp_hal::Config::default());
+    let mut peripherals = esp_hal::init(esp_hal::Config::default());
 
     // L298N inputs: drive all of them low first thing. Until this point they float, and a
     // floating EN that happens to read high while its IN pins differ spins the motor.
@@ -382,52 +415,16 @@ async fn main(spawner: Spawner) {
         output_low(peripherals.GPIO20),
         output_low(peripherals.GPIO21),
     );
-
-    // PWM on the enable pins with the LEDC peripheral. A LEDC *timer* is a counter that
-    // sets the frequency and the duty resolution; each *channel* compares that counter
-    // with its own duty value and drives one pin. Both motors share one timer.
-    // 10-bit duty: 1024 steps, plenty for 1 % steps (80 MHz / (1 kHz * 1024) ≈ 78 is a
-    // valid clock divider).
-    let mut ledc = Ledc::new(peripherals.LEDC);
-    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
-    let mut pwm_timer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    if let Err(e) = pwm_timer.configure(timer::config::Config {
-        duty: timer::config::Duty::Duty10Bit,
-        clock_source: timer::LSClockSource::APBClk,
-        frequency: MOTOR_PWM_FREQUENCY,
-    }) {
-        halt(format_args!("PWM timer setup failed: {e:?}")).await;
-    }
-    let pwm_channel = |number, pin: AnyPin<'static>| {
-        let mut channel = ledc.channel::<LowSpeed>(number, pin);
-        channel
-            .configure(channel::config::Config {
-                timer: &pwm_timer,
-                duty_pct: 0,
-                drive_mode: DriveMode::PushPull,
-            })
-            .map(|()| channel)
-    };
-    let (ena, enb) = match (
-        pwm_channel(channel::Number::Channel0, peripherals.GPIO0.into()),
-        pwm_channel(channel::Number::Channel1, peripherals.GPIO6.into()),
-    ) {
-        (Ok(ena), Ok(enb)) => (ena, enb),
-        (Err(e), _) | (_, Err(e)) => halt(format_args!("PWM channel setup failed: {e:?}")).await,
-    };
-    let mut left = Motor {
-        en: ena,
-        in_a: left_in.0,
-        in_b: left_in.1,
-    };
-    let mut right = Motor {
-        en: enb,
-        in_a: right_in.0,
-        in_b: right_in.1,
-    };
+    // The EN pins become PWM outputs later, in `control_loop`. Until then, drive them low
+    // through a temporary `Output`: `reborrow` lends the pin to it and gets it back when
+    // the `Output` is dropped right away (`let _`), and esp-hal leaves a dropped output
+    // pin as it was, so it stays low.
+    let _ = output_low(peripherals.GPIO0.reborrow());
+    let _ = output_low(peripherals.GPIO6.reborrow());
 
     // Embassy timers need a time source: esp-rtos drives them from hardware timer 0 of
     // timer group 0, and uses a software interrupt to wake the executor when one expires.
+    // Started early, because `halt` awaits a timer.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
@@ -443,28 +440,13 @@ async fn main(spawner: Spawner) {
     // about 0-2.5 V on the C3 (a full pack puts ~2.1 V on the pin). `AdcCalCurve` corrects
     // each reading with the chip's factory calibration (stored in eFuses) and returns mV.
     let mut adc_config = AdcConfig::new();
-    let mut battery_pin =
+    let pin =
         adc_config.enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO4, Attenuation::_11dB);
-    let mut adc = Adc::new(peripherals.ADC1, adc_config);
-    // Returns `(battery_v, pin_mv)`; printing is left to the caller, so the loop can time
-    // the ADC and the println separately.
-    let mut read_battery = || {
-        let mut sum: u32 = 0;
-        for _ in 0..BATTERY_AVERAGE {
-            // `read_oneshot` doesn't wait: it starts a conversion and returns `WouldBlock`
-            // until the result is ready (a few µs), so poll it.
-            let pin_mv = loop {
-                if let Ok(mv) = adc.read_oneshot(&mut battery_pin) {
-                    break mv;
-                }
-            };
-            sum += u32::from(pin_mv);
-        }
-        // The mean of u16 values always fits in a u16.
-        let pin_mv = u16::try_from(sum / BATTERY_AVERAGE).unwrap_or(u16::MAX);
-        (BATTERY_DIVIDER.battery_v(pin_mv), pin_mv)
+    let mut battery = Battery {
+        adc: Adc::new(peripherals.ADC1, adc_config),
+        pin,
     };
-    let (battery_v, pin_mv) = read_battery();
+    let (battery_v, pin_mv) = battery.read();
     println!("# battery {battery_v:.2} V (pin {pin_mv} mV)");
 
     // The board wires the IMU (and the SHTC3) to SDA = GPIO10, SCL = GPIO8, with pull-ups.
@@ -557,6 +539,150 @@ async fn main(spawner: Spawner) {
         "filter_pitch_deg"
     );
 
+    // From here on, log lines go through the queue to the log task, which owns the async
+    // USB-Serial-JTAG driver. (`println!` writes the same hardware directly; it is only
+    // used before this point and in `halt`.)
+    let (_, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
+        .into_async()
+        .split();
+    match log_writer(usb_tx) {
+        Ok(task) => spawner.spawn(task),
+        Err(e) => println!("# log task not started: {e:?}"),
+    }
+
+    // The control loop runs on its own executor, inside a software interrupt at priority 2.
+    // Interrupts preempt normal code, so whenever its tick comes it runs right away, even
+    // if the thread-mode tasks (log writer, blink) are in the middle of something. The
+    // executor must live forever (`&'static mut`): `StaticCell` hands out that reference
+    // once, safely.
+    let executor = CONTROL_EXECUTOR.init(InterruptExecutor::new(peripherals.FROM_CPU_INTR1));
+    let control_spawner = executor.start(Priority::Priority2);
+    let parts = ControlParts {
+        i2c,
+        battery,
+        bias,
+        ledc: peripherals.LEDC,
+        left: MotorPins {
+            en: peripherals.GPIO0.into(),
+            in_a: left_in.0,
+            in_b: left_in.1,
+        },
+        right: MotorPins {
+            en: peripherals.GPIO6.into(),
+            in_a: right_in.0,
+            in_b: right_in.1,
+        },
+    };
+    match control_loop(parts) {
+        Ok(task) => control_spawner.spawn(task),
+        Err(e) => println!("# control task not started: {e:?}"),
+    }
+}
+
+/// Everything the control loop needs, handed over from `main`.
+///
+/// Spawning onto another executor counts as sending the task to another "thread", so all
+/// of this must be `Send`. The motors' LEDC channels aren't (they hold a reference to a
+/// timer trait object), so the task builds them itself from the raw peripherals.
+struct ControlParts {
+    i2c: I2c<'static, Blocking>,
+    battery: Battery,
+    bias: GyroBias,
+    ledc: LEDC<'static>,
+    left: MotorPins,
+    right: MotorPins,
+}
+
+/// The pins of one L298N channel before its EN pin becomes a PWM output.
+struct MotorPins {
+    en: AnyPin<'static>,
+    in_a: Output<'static>,
+    in_b: Output<'static>,
+}
+
+static CONTROL_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+static PWM_TIMER: StaticCell<timer::Timer<'static, LowSpeed>> = StaticCell::new();
+
+/// Drives the motors for one motor test step.
+fn apply_test_step(
+    step: TestStep,
+    left: &mut Motor<'_>,
+    right: &mut Motor<'_>,
+) -> Result<(), channel::Error> {
+    match step {
+        TestStep::Run(side, direction, _, duty_pct) => match side {
+            Side::Left => left.run(direction, duty_pct),
+            Side::Right => right.run(direction, duty_pct),
+        },
+        TestStep::Stop | TestStep::Done => left.stop().and_then(|()| right.stop()),
+    }
+}
+
+/// Sets up PWM on the L298N enable pins and returns the `(left, right)` motors, stopped.
+async fn setup_motors(
+    ledc: LEDC<'static>,
+    left: MotorPins,
+    right: MotorPins,
+) -> (Motor<'static>, Motor<'static>) {
+    // PWM on the enable pins with the LEDC peripheral. A LEDC *timer* is a counter that
+    // sets the frequency and the duty resolution; each *channel* compares that counter
+    // with its own duty value and drives one pin. Both motors share one timer.
+    // 10-bit duty: 1024 steps, plenty for 1 % steps (80 MHz / (1 kHz * 1024) ≈ 78 is a
+    // valid clock divider).
+    let mut ledc = Ledc::new(ledc);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+    // The channels keep a reference to the timer for as long as they exist, i.e. forever:
+    // so the timer must be `'static` too.
+    let pwm_timer = PWM_TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
+    if let Err(e) = pwm_timer.configure(timer::config::Config {
+        duty: timer::config::Duty::Duty10Bit,
+        clock_source: timer::LSClockSource::APBClk,
+        frequency: MOTOR_PWM_FREQUENCY,
+    }) {
+        halt(format_args!("PWM timer setup failed: {e:?}")).await;
+    }
+    let pwm_channel = |number, pin: AnyPin<'static>| {
+        let mut channel = ledc.channel::<LowSpeed>(number, pin);
+        channel
+            .configure(channel::config::Config {
+                timer: &*pwm_timer,
+                duty_pct: 0,
+                drive_mode: DriveMode::PushPull,
+            })
+            .map(|()| channel)
+    };
+    let (ena, enb) = match (
+        pwm_channel(channel::Number::Channel0, left.en),
+        pwm_channel(channel::Number::Channel1, right.en),
+    ) {
+        (Ok(ena), Ok(enb)) => (ena, enb),
+        (Err(e), _) | (_, Err(e)) => halt(format_args!("PWM channel setup failed: {e:?}")).await,
+    };
+    let left = Motor {
+        en: ena,
+        in_a: left.in_a,
+        in_b: left.in_b,
+    };
+    let right = Motor {
+        en: enb,
+        in_a: right.in_a,
+        in_b: right.in_b,
+    };
+    (left, right)
+}
+
+/// The 500 Hz loop: read the IMU, update the filters, run the motor test, queue log
+/// messages. Runs on the interrupt executor, so it preempts the thread-mode tasks.
+#[embassy_executor::task]
+async fn control_loop(parts: ControlParts) {
+    let (mut left, mut right) = setup_motors(parts.ledc, parts.left, parts.right).await;
+    let ControlParts {
+        mut i2c,
+        mut battery,
+        bias,
+        ..
+    } = parts;
+
     let motor_test_start = Instant::now();
     let mut motor_step = None;
     // Gyro-only pitch: starts at the accelerometer pitch of the first sample, then only
@@ -574,17 +700,6 @@ async fn main(spawner: Spawner) {
         }
         times.log_send = times.log_send.max(start.elapsed().as_micros());
     };
-
-    // From here on, log lines go through the queue to the log task, which owns the async
-    // USB-Serial-JTAG driver. (`println!` writes the same hardware directly; it is only
-    // used before this point and in `halt`.)
-    let (_, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
-        .into_async()
-        .split();
-    match log_writer(usb_tx) {
-        Ok(task) => spawner.spawn(task),
-        Err(e) => println!("# log task not started: {e:?}"),
-    }
 
     let loop_start = Instant::now();
     let mut ticker = Ticker::every(SAMPLE_PERIOD);
@@ -604,7 +719,7 @@ async fn main(spawner: Spawner) {
 
         if sample.is_multiple_of(BATTERY_LOG_EVERY_N_SAMPLES) {
             let start = Instant::now();
-            let (battery_v, pin_mv) = read_battery();
+            let (battery_v, pin_mv) = battery.read();
             times.battery_adc = times.battery_adc.max(start.elapsed().as_micros());
             log(&mut times, LogMsg::Battery { battery_v, pin_mv });
         }
@@ -617,14 +732,7 @@ async fn main(spawner: Spawner) {
         if motor_step != Some(step) {
             motor_step = Some(step);
             log(&mut times, LogMsg::Motor(step));
-            let result = match step {
-                TestStep::Run(side, direction, _, duty_pct) => match side {
-                    Side::Left => left.run(direction, duty_pct),
-                    Side::Right => right.run(direction, duty_pct),
-                },
-                TestStep::Stop | TestStep::Done => left.stop().and_then(|()| right.stop()),
-            };
-            if let Err(e) = result {
+            if let Err(e) = apply_test_step(step, &mut left, &mut right) {
                 log(&mut times, LogMsg::MotorError(e));
             }
         }

@@ -55,6 +55,7 @@ dependencies = [
  "esp-rtos",
  "heapless 0.9.3",
  "icm42670",
+ "static_cell",
 ]
 
 [[package]]

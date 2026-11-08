@@ -27,6 +27,8 @@ embassy-sync = "0.8"
 heapless = "0.9"
 # The async `Write` trait (`write_all`) that esp-hal's USB-Serial-JTAG driver implements.
 embedded-io-async = "0.7"
+# `StaticCell`: hands out a `&'static mut` to a value once, at runtime, without `unsafe`.
+static_cell = "2"
 # Writes the app descriptor the ESP-IDF 2nd stage bootloader expects (espflash refuses images without it).
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32c3"] }
 # println! over the USB-Serial-JTAG only: never touch UART0 (GPIO20/21 are IN3/IN4 on the L298N).
