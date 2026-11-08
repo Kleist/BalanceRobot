@@ -51,7 +51,7 @@ connected; record it in the table below.
 | Battery − | L298N GND | | ✅ | |
 | L298N OUT1 / OUT2 | Left motor | | ✅ | Swap the two wires if the motor runs backwards |
 | L298N OUT3 / OUT4 | Right motor | | ✅ | |
-| Battery + → 100 kΩ → GPIO4 → 33 kΩ → GND | ESP32-C3 GPIO4 | Battery voltage sense (ADC1) | ⬜ | 8.4 V × 33 / 133 ≈ 2.1 V |
+| Battery + → 100 kΩ → GPIO4 → 33 kΩ → GND | ESP32-C3 GPIO4 | Battery voltage sense (ADC1) | ✅ | 8.4 V × 33 / 133 ≈ 2.1 V |
 | (spare) | ESP32-C3 GPIO5 | GY-521 INT, if that IMU is ever used | ⬜ | |
 
 ## Why these pins

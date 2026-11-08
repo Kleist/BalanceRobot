@@ -120,7 +120,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Both motors, both directions, full speed (no PWM yet)
 - [x] PWM speed control via LEDC
 - [x] Measure the PWM deadband of both motors
-- [ ] Battery voltage via ADC on GPIO4
+- [x] Battery voltage via ADC on GPIO4
 - [x] PID controller math in `balance-core` (`pid::Pid`: output limits, anti-windup, derivative on measurement), unit tested
 - [ ] Simulation: host-only `sim/` crate (std, root workspace) with an inverted-pendulum-on-wheels physics model, no controller yet; unit test that an upright robot falls at the rate the physics predicts
 - [ ] Simulation: IMU sensor model (noise, bias, quantisation in the firmware's LSB units), output CSV in the firmware log format

@@ -3,6 +3,9 @@
 //! accelerometer alone and the bias-corrected gyro rates. The IMU is read at 100 Hz, but
 //! only every `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable.
 //!
+//! The battery voltage (divider on GPIO4) is logged at startup and then every 0.5 s as
+//! `# battery ...` lines, also during the motor test, so the sag under load shows up.
+//!
 //! At startup the gyro bias is calibrated while the robot stands still (LED on).
 //! After that the LED toggles on every sample, so a steady glow/flicker means the
 //! loop is running.
@@ -19,10 +22,12 @@
 
 use balance_core::{
     attitude::accel_pitch_deg,
+    battery::Divider,
     gyro::{BiasCalibrator, GyroBias},
 };
 use esp_backtrace as _;
 use esp_hal::{
+    analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     gpio::{AnyPin, DriveMode, Level, Output, OutputConfig, OutputPin},
     i2c::master::{Config as I2cConfig, I2c},
     ledc::{
@@ -48,6 +53,16 @@ const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 /// Log one CSV line per this many samples: 10 = 10 lines/s. Set to 1 to log every sample
 /// (e.g. to look at vibration or noise), or higher for an even quieter log.
 const LOG_EVERY_N_SAMPLES: u32 = 10;
+
+/// Battery sense divider: battery + → 100 kΩ → GPIO4 → 33 kΩ → GND.
+const BATTERY_DIVIDER: Divider = Divider {
+    top_ohm: 100_000.0,
+    bottom_ohm: 33_000.0,
+};
+/// ADC readings averaged per battery measurement, to smooth out ADC noise.
+const BATTERY_AVERAGE: u32 = 16;
+/// Log the battery voltage once per this many samples: 50 = every 0.5 s.
+const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 50;
 
 /// Gyro calibration: 200 samples at 100 Hz = 2 s of holding still.
 const CALIBRATION_SAMPLES: u32 = 200;
@@ -271,6 +286,32 @@ fn main() -> ! {
 
     let mut led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
 
+    // Battery voltage on GPIO4 = ADC1 channel 4. 11 dB attenuation gives an input range of
+    // about 0-2.5 V on the C3 (a full pack puts ~2.1 V on the pin). `AdcCalCurve` corrects
+    // each reading with the chip's factory calibration (stored in eFuses) and returns mV.
+    let mut adc_config = AdcConfig::new();
+    let mut battery_pin =
+        adc_config.enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO4, Attenuation::_11dB);
+    let mut adc = Adc::new(peripherals.ADC1, adc_config);
+    let mut log_battery = || {
+        let mut sum: u32 = 0;
+        for _ in 0..BATTERY_AVERAGE {
+            // `read_oneshot` doesn't wait: it starts a conversion and returns `WouldBlock`
+            // until the result is ready (a few µs), so poll it.
+            let pin_mv = loop {
+                if let Ok(mv) = adc.read_oneshot(&mut battery_pin) {
+                    break mv;
+                }
+            };
+            sum += u32::from(pin_mv);
+        }
+        // The mean of u16 values always fits in a u16.
+        let pin_mv = u16::try_from(sum / BATTERY_AVERAGE).unwrap_or(u16::MAX);
+        let battery_v = BATTERY_DIVIDER.battery_v(pin_mv);
+        println!("# battery {battery_v:.2} V (pin {pin_mv} mV)");
+    };
+    log_battery();
+
     // The board wires the IMU (and the SHTC3) to SDA = GPIO10, SCL = GPIO8, with pull-ups.
     // 400 kHz "fast mode": the driver does one I2C transaction per register byte, so speed matters.
     let i2c = match I2c::new(
@@ -338,6 +379,10 @@ fn main() -> ! {
         next += SAMPLE_PERIOD;
         // Wraps after ~500 days at 100 Hz; the only effect is one irregular log gap.
         sample = sample.wrapping_add(1);
+
+        if sample.is_multiple_of(BATTERY_LOG_EVERY_N_SAMPLES) {
+            log_battery();
+        }
 
         let step = motor_test_step(motor_test_start.elapsed().as_millis() / MOTOR_TEST_STEP_MS);
         if motor_step != Some(step) {
