@@ -1,6 +1,7 @@
 //! Read raw accelerometer and gyro samples from the onboard ICM-42670-P and log them
 //! over USB-Serial-JTAG as CSV lines, followed by the pitch angle computed from the
-//! accelerometer alone and the bias-corrected gyro rates. The IMU is read at 100 Hz, but
+//! accelerometer alone, the bias-corrected gyro rates and the pitch from integrating the
+//! gyro alone (which drifts: compare it with the accelerometer pitch over a few minutes). The IMU is read at 100 Hz, but
 //! only every `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable.
 //!
 //! The `icm42670` driver only sets the chip up. After that each sample is one burst read
@@ -55,6 +56,8 @@ const GYRO_RANGE: GyroRange = GyroRange::Deg500;
 /// I2C address of the onboard ICM-42670-P (AD0 tied low).
 const IMU_ADDRESS: u8 = 0x68;
 const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+/// `SAMPLE_PERIOD` in seconds, for integrating the gyro rate.
+const DT_S: f32 = 0.01;
 /// Log one CSV line per this many samples: 10 = 10 lines/s. Set to 1 to log every sample
 /// (e.g. to look at vibration or noise), or higher for an even quieter log.
 const LOG_EVERY_N_SAMPLES: u32 = 10;
@@ -220,6 +223,18 @@ fn robot_axes(a: [i16; 3]) -> (f32, f32) {
     let forward = f32::from(a[0]);
     let up = f32::from(a[2]);
     (forward, up)
+}
+
+/// The robot's pitch rate in °/s (positive = tipping forward) from the gyro's `[x, y, z]`.
+///
+/// Pitching rotates the robot about its wheel axle, which is the axis perpendicular to
+/// both forward and up: Y, if `robot_axes` is right. By the right-hand rule a positive
+/// rotation about +Y turns +X (forward) towards −Z (down), i.e. tips forward, so no sign
+/// flip. Check it with the log: tilt the robot slowly forward and back, and
+/// `gyro_pitch_deg` must move the same way as `pitch_deg`. If it moves the opposite way,
+/// negate the rate.
+fn robot_pitch_rate(rates_dps: [f32; 3]) -> f32 {
+    rates_dps[1]
 }
 
 /// Reads accel + gyro in one I2C transaction: write the address of the first data
@@ -393,12 +408,26 @@ fn main() -> ! {
         GYRO_RANGE.scale_factor()
     );
     println!(
-        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7}",
-        "t_us", "ax", "ay", "az", "gx", "gy", "gz", "pitch_deg", "gx_dps", "gy_dps", "gz_dps"
+        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14}",
+        "t_us",
+        "ax",
+        "ay",
+        "az",
+        "gx",
+        "gy",
+        "gz",
+        "pitch_deg",
+        "gx_dps",
+        "gy_dps",
+        "gz_dps",
+        "gyro_pitch_deg"
     );
 
     let motor_test_start = Instant::now();
     let mut motor_step = None;
+    // Gyro-only pitch: starts at the accelerometer pitch of the first sample, then only
+    // ever adds up rate × dt. Any leftover bias adds up too, so this drifts.
+    let mut gyro_pitch: Option<f32> = None;
 
     let mut next = Instant::now();
     let mut sample: u32 = 0;
@@ -445,19 +474,22 @@ fn main() -> ! {
         // Read every sample even when it isn't logged: later steps feed each one into the
         // filter and the control loop. Read errors are always logged.
         match read_imu(&mut i2c) {
-            Ok(RawSample { accel: a, gyro: g })
-                if motor_step == Some(TestStep::Done)
-                    && sample.is_multiple_of(LOG_EVERY_N_SAMPLES) =>
-            {
+            Ok(RawSample { accel: a, gyro: g }) => {
                 let (forward, up) = robot_axes(a);
                 let pitch = accel_pitch_deg(forward, up);
-                let [rx, ry, rz] = bias.apply(gyro_dps(g));
-                println!(
-                    "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2}",
-                    a[0], a[1], a[2], g[0], g[1], g[2]
-                );
+                let rates = bias.apply(gyro_dps(g));
+                let gyro_pitch = gyro_pitch.get_or_insert(pitch);
+                *gyro_pitch += robot_pitch_rate(rates) * DT_S;
+
+                if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
+                {
+                    let [rx, ry, rz] = rates;
+                    println!(
+                        "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1}",
+                        a[0], a[1], a[2], g[0], g[1], g[2], *gyro_pitch
+                    );
+                }
             }
-            Ok(_) => {}
             Err(e) => println!("# IMU read failed: {e:?}"),
         }
 
