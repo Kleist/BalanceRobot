@@ -3,6 +3,9 @@
 //! accelerometer alone and the bias-corrected gyro rates. The IMU is read at 100 Hz, but
 //! only every `LOG_EVERY_N_SAMPLES`th sample is logged, so the log stays readable.
 //!
+//! The `icm42670` driver only sets the chip up. After that each sample is one burst read
+//! of all 12 data bytes (see `read_imu`); the time both ways take is logged at startup.
+//!
 //! The battery voltage (divider on GPIO4) is logged at startup and then every 0.5 s as
 //! `# battery ...` lines, also during the motor test, so the sag under load shows up.
 //!
@@ -10,7 +13,7 @@
 //! After that the LED toggles on every sample, so a steady glow/flicker means the
 //! loop is running.
 //!
-//! Deadband test, after calibration: each motor in turn, forward then backward, ramps the
+//! Deadband test (off unless `MOTOR_TEST_ENABLED`), after calibration: each motor in turn, forward then backward, ramps the
 //! PWM duty up from 20 % to 50 % and back down to 10 % in 2 % steps (0.5 s each), then
 //! stops for 1 s (see `motor_test_step`). Watch the wheel and note at which logged duty it
 //! starts turning on the way up and stops on the way down. The sequence runs twice, then
@@ -24,12 +27,14 @@ use balance_core::{
     attitude::accel_pitch_deg,
     battery::Divider,
     gyro::{BiasCalibrator, GyroBias},
+    imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
 };
 use esp_backtrace as _;
 use esp_hal::{
+    Blocking,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     gpio::{AnyPin, DriveMode, Level, Output, OutputConfig, OutputPin},
-    i2c::master::{Config as I2cConfig, I2c},
+    i2c::master::{Config as I2cConfig, Error as I2cError, I2c},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self, Channel, ChannelIFace},
@@ -39,9 +44,7 @@ use esp_hal::{
     time::{Duration, Instant, Rate},
 };
 use esp_println::println;
-use icm42670::{
-    AccelRange, Address, GyroRange, Icm42670, accelerometer::vector::I16x3, prelude::*,
-};
+use icm42670::{AccelRange, Address, GyroRange, Icm42670, prelude::*};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -49,6 +52,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const ACCEL_RANGE: AccelRange = AccelRange::G4;
 /// ±500 °/s: fast enough for a falling robot, 65.5 LSB per °/s.
 const GYRO_RANGE: GyroRange = GyroRange::Deg500;
+/// I2C address of the onboard ICM-42670-P (AD0 tied low).
+const IMU_ADDRESS: u8 = 0x68;
 const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 /// Log one CSV line per this many samples: 10 = 10 lines/s. Set to 1 to log every sample
 /// (e.g. to look at vibration or noise), or higher for an even quieter log.
@@ -67,11 +72,10 @@ const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 50;
 /// Gyro calibration: 200 samples at 100 Hz = 2 s of holding still.
 const CALIBRATION_SAMPLES: u32 = 200;
 /// Largest allowed max − min per axis during calibration, in °/s. The gyro's noise at
-/// rest is about 0.5 °/s peak to peak, but the driver reads high and low bytes in
-/// separate transactions, so an axis crossing zero can tear into a single spike of up to
-/// 255 LSB ≈ 3.9 °/s. Moving the robot gives tens of °/s, which rejects the calibration.
-/// Tighten this once the IMU is burst-read.
-const CALIBRATION_MAX_SPREAD_DPS: f32 = 5.0;
+/// rest is about 0.5 °/s peak to peak; moving the robot gives tens of °/s, which rejects
+/// the calibration. (With per-register reads this had to be 5 °/s: an axis crossing zero
+/// could tear into a single 3.9 °/s spike. Burst reads can't tear.)
+const CALIBRATION_MAX_SPREAD_DPS: f32 = 2.0;
 
 /// PWM frequency for the L298N enable pins. 1 kHz is a compromise: the L298N switches
 /// slowly (a few µs per edge), so at low frequencies those edges are a small part of
@@ -102,6 +106,9 @@ const MOTOR_TEST_RAMPS: [(Side, Direction); 4] = [
 ];
 /// Passes through `MOTOR_TEST_RAMPS` before the test ends and the motors stay off.
 const MOTOR_TEST_PASSES: u64 = 2;
+/// Run the deadband test after calibration. Off while working on the IMU, because the
+/// test pauses the CSV log; set to `true` to run it again.
+const MOTOR_TEST_ENABLED: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
@@ -193,13 +200,9 @@ impl Motor<'_> {
 }
 
 /// Raw gyro LSB to °/s for the configured range.
-fn gyro_dps(g: I16x3) -> [f32; 3] {
+fn gyro_dps(g: [i16; 3]) -> [f32; 3] {
     let scale = GYRO_RANGE.scale_factor();
-    [
-        f32::from(g.x) / scale,
-        f32::from(g.y) / scale,
-        f32::from(g.z) / scale,
-    ]
+    g.map(|v| f32::from(v) / scale)
 }
 
 /// Map the IMU's X/Y/Z to the robot's `(forward, up)`, including signs.
@@ -213,10 +216,21 @@ fn gyro_dps(g: I16x3) -> [f32; 3] {
 /// 2. Tilt the robot forward (nose down). The forward value must go negative and
 ///    `pitch_deg` positive. If the signs are reversed, negate forward; if a different
 ///    axis changes, use that one as forward.
-fn robot_axes(a: I16x3) -> (f32, f32) {
-    let forward = f32::from(a.x);
-    let up = f32::from(a.z);
+fn robot_axes(a: [i16; 3]) -> (f32, f32) {
+    let forward = f32::from(a[0]);
+    let up = f32::from(a[2]);
     (forward, up)
+}
+
+/// Reads accel + gyro in one I2C transaction: write the address of the first data
+/// register, then (after a repeated START, without releasing the bus) read 12 bytes.
+/// The chip steps through the registers by itself. Within one transaction it doesn't
+/// update the data registers (as far as we know for this TDK sensor family; the log
+/// would show torn values otherwise), so all 12 bytes come from the same sample.
+fn read_imu(i2c: &mut I2c<'_, Blocking>) -> Result<RawSample, I2cError> {
+    let mut bytes = [0; DATA_LEN];
+    i2c.write_read(IMU_ADDRESS, &[DATA_START_REGISTER], &mut bytes)?;
+    Ok(RawSample::from_burst(&bytes))
 }
 
 /// A push-pull output that starts low.
@@ -313,7 +327,7 @@ fn main() -> ! {
     log_battery();
 
     // The board wires the IMU (and the SHTC3) to SDA = GPIO10, SCL = GPIO8, with pull-ups.
-    // 400 kHz "fast mode": the driver does one I2C transaction per register byte, so speed matters.
+    // 400 kHz "fast mode": at 500 Hz later, every µs of bus time counts.
     let i2c = match I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(400)),
@@ -334,6 +348,19 @@ fn main() -> ! {
         halt(format_args!("IMU range setup failed: {e:?}"));
     }
 
+    // Compare once: the driver's reads (one I2C transaction per byte, 12 per sample) with
+    // one burst read. Then take the bus back from the driver for good.
+    let start = Instant::now();
+    let per_register_ok = imu.accel_raw().is_ok() && imu.gyro_raw().is_ok();
+    let per_register_us = start.elapsed().as_micros();
+    let mut i2c = imu.free();
+    let start = Instant::now();
+    let burst_ok = read_imu(&mut i2c).is_ok();
+    let burst_us = start.elapsed().as_micros();
+    println!(
+        "# IMU read time: per-register {per_register_us} us (ok: {per_register_ok}), burst {burst_us} us (ok: {burst_ok})"
+    );
+
     // Gyro bias: average ~2 s of samples while the robot is still, and retry until the
     // robot was still enough. The LED stays on while calibrating.
     led.set_high();
@@ -343,8 +370,8 @@ fn main() -> ! {
         let mut next = Instant::now();
         for _ in 0..CALIBRATION_SAMPLES {
             next += SAMPLE_PERIOD;
-            match imu.gyro_raw() {
-                Ok(g) => calibrator.add(gyro_dps(g)),
+            match read_imu(&mut i2c) {
+                Ok(sample) => calibrator.add(gyro_dps(sample.gyro)),
                 Err(e) => println!("# gyro read failed: {e:?}"),
             }
             wait_until(next);
@@ -384,7 +411,11 @@ fn main() -> ! {
             log_battery();
         }
 
-        let step = motor_test_step(motor_test_start.elapsed().as_millis() / MOTOR_TEST_STEP_MS);
+        let step = if MOTOR_TEST_ENABLED {
+            motor_test_step(motor_test_start.elapsed().as_millis() / MOTOR_TEST_STEP_MS)
+        } else {
+            TestStep::Done
+        };
         if motor_step != Some(step) {
             motor_step = Some(step);
             let result = match step {
@@ -397,7 +428,7 @@ fn main() -> ! {
                 }
                 TestStep::Stop | TestStep::Done => {
                     if step == TestStep::Done {
-                        println!("# motor test done, motors off");
+                        println!("# motor test done (or disabled), motors off");
                     } else {
                         println!("# motor stop");
                     }
@@ -413,8 +444,8 @@ fn main() -> ! {
 
         // Read every sample even when it isn't logged: later steps feed each one into the
         // filter and the control loop. Read errors are always logged.
-        match (imu.accel_raw(), imu.gyro_raw()) {
-            (Ok(a), Ok(g))
+        match read_imu(&mut i2c) {
+            Ok(RawSample { accel: a, gyro: g })
                 if motor_step == Some(TestStep::Done)
                     && sample.is_multiple_of(LOG_EVERY_N_SAMPLES) =>
             {
@@ -423,12 +454,11 @@ fn main() -> ! {
                 let [rx, ry, rz] = bias.apply(gyro_dps(g));
                 println!(
                     "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2}",
-                    a.x, a.y, a.z, g.x, g.y, g.z
+                    a[0], a[1], a[2], g[0], g[1], g[2]
                 );
             }
-            (Ok(_), Ok(_)) => {}
-            (Err(e), _) => println!("# accel read failed: {e:?}"),
-            (_, Err(e)) => println!("# gyro read failed: {e:?}"),
+            Ok(_) => {}
+            Err(e) => println!("# IMU read failed: {e:?}"),
         }
 
         led.toggle();

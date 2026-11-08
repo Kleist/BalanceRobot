@@ -90,7 +90,7 @@ cargo build --release
 
 - `esp-hal` + Embassy (no_std), async
 - LEDC for motor PWM on both channels (needs esp-hal's `unstable` feature; the C3 has no MCPWM). 1 kHz, 10-bit. Measured deadband in "Known limitations" below
-- `icm42670` crate for the onboard IMU (embedded-hal). v0.2 reads each register byte in its own I2C transaction (12 per accel+gyro sample, high/low bytes not read atomically): fine for logging, too slow and tear-prone for a 500 Hz loop
+- `icm42670` crate for the onboard IMU (embedded-hal), used only for setup (WHO_AM_I, power, ranges): v0.2 reads each register byte in its own I2C transaction, which is slow and tears values. After setup the firmware takes the bus back (`free()`) and burst-reads all 12 data bytes from 0x0B in one transaction; decoding is `balance_core::imu::RawSample`
 - IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s. Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
 - The onboard IMU interrupt is probably not broken out: drive the control loop from an Embassy ticker at ~500 Hz and poll the IMU
 - BLE later. **ESP32-C3 is BLE only (no Classic BT / SPP)**, so the Android app must use GATT
@@ -113,7 +113,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Gyro bias calibration math in `balance-core` (`gyro::BiasCalibrator`), unit tested
 - [x] Calibrate the gyro bias at startup
 - [ ] Pitch angle by integrating the gyro only (see the drift)
-- [ ] Burst-read the IMU (one I2C transaction per sample) so it keeps up with the control loop
+- [x] Burst-read the IMU (one I2C transaction per sample) so it keeps up with the control loop
 - [x] Complementary filter math in `balance-core` (`attitude::ComplementaryFilter`), unit tested
 - [ ] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
 - [x] One motor, one direction, full speed (wheels off the ground)
