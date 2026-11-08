@@ -7,9 +7,9 @@
 //! After that the LED toggles on every sample, so a steady glow/flicker means the
 //! loop is running.
 //!
-//! Motor test: the left motor (L298N channel A) runs at full speed in one direction for
-//! 2 s, then stops for 2 s, repeating. `# motor on` / `# motor off` lines in the log mark
-//! the switches. Keep the wheels off the ground.
+//! Motor test, after calibration, repeating: each motor in turn runs at full speed
+//! forward, then backward, 2 s each, with a 2 s stop in between (see `MOTOR_TEST`).
+//! `# motor ...` lines in the log mark each phase. Keep the wheels off the ground.
 
 #![no_std]
 #![no_main]
@@ -20,7 +20,7 @@ use balance_core::{
 };
 use esp_backtrace as _;
 use esp_hal::{
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Level, Output, OutputConfig, OutputPin},
     i2c::master::{Config as I2cConfig, I2c},
     main,
     time::{Duration, Instant, Rate},
@@ -50,8 +50,64 @@ const CALIBRATION_SAMPLES: u32 = 200;
 /// Tighten this once the IMU is burst-read.
 const CALIBRATION_MAX_SPREAD_DPS: f32 = 5.0;
 
-/// Motor test: on for this long, then off for this long.
-const MOTOR_TEST_HALF_PERIOD_MS: u64 = 2000;
+/// Motor test: how long each phase of `MOTOR_TEST` lasts.
+const MOTOR_TEST_PHASE_MS: u64 = 2000;
+
+#[derive(Debug, Clone, Copy)]
+enum Side {
+    Left,
+    Right,
+}
+
+/// "Forward" is just IN1 high / IN2 low (IN3 / IN4 for the right motor). Whether that
+/// drives the robot forward depends on how each motor is wired to the OUT pins: check it
+/// on the robot and swap the motor wires if needed.
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Forward,
+    Backward,
+}
+
+/// Motor test sequence, one phase per `MOTOR_TEST_PHASE_MS`, repeating. `None` = both
+/// motors stopped. The stop between runs means a motor never reverses at full speed,
+/// which would draw a large current spike and could brown out the battery.
+const MOTOR_TEST: [Option<(Side, Direction)>; 8] = [
+    Some((Side::Left, Direction::Forward)),
+    None,
+    Some((Side::Left, Direction::Backward)),
+    None,
+    Some((Side::Right, Direction::Forward)),
+    None,
+    Some((Side::Right, Direction::Backward)),
+    None,
+];
+
+/// One L298N channel: EN switches the channel's outputs on (full speed, no PWM yet),
+/// the two IN pins pick the direction.
+struct Motor<'d> {
+    en: Output<'d>,
+    in_a: Output<'d>,
+    in_b: Output<'d>,
+}
+
+impl Motor<'_> {
+    fn run(&mut self, direction: Direction) {
+        // Switch off while changing the IN pins, so the outputs never see a half-changed
+        // combination.
+        self.en.set_low();
+        let forward = matches!(direction, Direction::Forward);
+        self.in_a.set_level(Level::from(forward));
+        self.in_b.set_level(Level::from(!forward));
+        self.en.set_high();
+    }
+
+    /// EN low: both outputs off, the motor coasts to a stop.
+    fn stop(&mut self) {
+        self.en.set_low();
+        self.in_a.set_low();
+        self.in_b.set_low();
+    }
+}
 
 /// Raw gyro LSB to °/s for the configured range.
 fn gyro_dps(g: I16x3) -> [f32; 3] {
@@ -80,6 +136,11 @@ fn robot_axes(a: I16x3) -> (f32, f32) {
     (forward, up)
 }
 
+/// A push-pull output that starts low.
+fn output_low<'d>(pin: impl OutputPin + 'd) -> Output<'d> {
+    Output::new(pin, Level::Low, OutputConfig::default())
+}
+
 /// Busy-wait. Fine for now; later steps replace this with async Embassy timers.
 fn wait_until(deadline: Instant) {
     while Instant::now() < deadline {}
@@ -90,15 +151,17 @@ fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
     // L298N inputs: drive all of them low first thing. Until this point they float, and a
-    // floating ENA that happens to read high while IN1 != IN2 spins the motor.
-    // EN low = both outputs of that channel off (the motor coasts), whatever IN1/IN2 are.
-    // The `_name` bindings keep the unused pins alive and low (a plain `_` would drop them).
-    let mut ena = Output::new(peripherals.GPIO0, Level::Low, OutputConfig::default());
-    let mut in1 = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
-    let _in2 = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
-    let _enb = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
-    let _in3 = Output::new(peripherals.GPIO20, Level::Low, OutputConfig::default());
-    let _in4 = Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default());
+    // floating EN that happens to read high while its IN pins differ spins the motor.
+    let mut left = Motor {
+        en: output_low(peripherals.GPIO0),
+        in_a: output_low(peripherals.GPIO1),
+        in_b: output_low(peripherals.GPIO3),
+    };
+    let mut right = Motor {
+        en: output_low(peripherals.GPIO6),
+        in_a: output_low(peripherals.GPIO20),
+        in_b: output_low(peripherals.GPIO21),
+    };
 
     let mut led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
 
@@ -160,11 +223,8 @@ fn main() -> ! {
         "t_us", "ax", "ay", "az", "gx", "gy", "gz", "pitch_deg", "gx_dps", "gy_dps", "gz_dps"
     );
 
-    // Direction: IN1 high, IN2 low. Which way that turns the wheel depends on how the motor
-    // is wired to OUT1/OUT2. Speed is all or nothing for now: ENA high = full speed.
-    in1.set_high();
     let motor_test_start = Instant::now();
-    let mut motor_on = false;
+    let mut motor_phase = None;
 
     let mut next = Instant::now();
     let mut sample: u32 = 0;
@@ -173,16 +233,21 @@ fn main() -> ! {
         // Wraps after ~500 days at 100 Hz; the only effect is one irregular log gap.
         sample = sample.wrapping_add(1);
 
-        let half_periods = motor_test_start.elapsed().as_millis() / MOTOR_TEST_HALF_PERIOD_MS;
-        let want_on = half_periods.is_multiple_of(2);
-        if want_on != motor_on {
-            motor_on = want_on;
-            if motor_on {
-                ena.set_high();
-                println!("# motor on");
+        let phases = motor_test_start.elapsed().as_millis() / MOTOR_TEST_PHASE_MS;
+        // The remainder is < 8, so the conversion can't fail.
+        let phase = usize::try_from(phases % MOTOR_TEST.len() as u64).unwrap_or(0);
+        if motor_phase != Some(phase) {
+            motor_phase = Some(phase);
+            left.stop();
+            right.stop();
+            if let Some((side, direction)) = MOTOR_TEST[phase] {
+                match side {
+                    Side::Left => left.run(direction),
+                    Side::Right => right.run(direction),
+                }
+                println!("# motor {side:?} {direction:?}");
             } else {
-                ena.set_low();
-                println!("# motor off");
+                println!("# motor stop");
             }
         }
 
