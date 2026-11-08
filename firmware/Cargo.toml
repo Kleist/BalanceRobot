@@ -11,7 +11,9 @@ publish = false
 [workspace]
 
 [dependencies]
-esp-hal = { version = "1.2", features = ["esp32c3"] }
+# `unstable` unlocks drivers whose API may still change in minor releases; we need it for
+# LEDC (motor PWM). The ESP32-C3 has no MCPWM, so LEDC is its only PWM peripheral.
+esp-hal = { version = "1.2", features = ["esp32c3", "unstable"] }
 # Writes the app descriptor the ESP-IDF 2nd stage bootloader expects (espflash refuses images without it).
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32c3"] }
 # println! over the USB-Serial-JTAG only: never touch UART0 (GPIO20/21 are IN3/IN4 on the L298N).
