@@ -36,9 +36,11 @@ const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 /// Gyro calibration: 200 samples at 100 Hz = 2 s of holding still.
 const CALIBRATION_SAMPLES: u32 = 200;
 /// Largest allowed max − min per axis during calibration, in °/s. The gyro's noise at
-/// rest is well below 1 °/s peak to peak; picking the robot up or bumping it gives
-/// several °/s, which rejects the calibration.
-const CALIBRATION_MAX_SPREAD_DPS: f32 = 2.0;
+/// rest is about 0.5 °/s peak to peak, but the driver reads high and low bytes in
+/// separate transactions, so an axis crossing zero can tear into a single spike of up to
+/// 255 LSB ≈ 3.9 °/s. Moving the robot gives tens of °/s, which rejects the calibration.
+/// Tighten this once the IMU is burst-read.
+const CALIBRATION_MAX_SPREAD_DPS: f32 = 5.0;
 
 /// Raw gyro LSB to °/s for the configured range.
 fn gyro_dps(g: I16x3) -> [f32; 3] {
