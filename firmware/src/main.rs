@@ -10,12 +10,16 @@
 //! The battery voltage (divider on GPIO4) is logged at startup and then every 0.5 s as
 //! `# battery ...` lines, also during the motor test, so the sag under load shows up.
 //!
-//! At startup the gyro bias is calibrated while the robot stands still (LED on).
-//! After that the LED toggles on every sample, so a steady glow/flicker means the
-//! loop is running.
+//! At startup the gyro bias is calibrated while the robot stands still.
 //!
-//! Deadband test (off unless `MOTOR_TEST_ENABLED`), after calibration: each motor in turn, forward then backward, ramps the
-//! PWM duty up from 20 % to 50 % and back down to 10 % in 2 % steps (0.5 s each), then
+//! Runs on the Embassy async executor: the LED on GPIO7 blinks once a second from its own
+//! task (`blink`), independent of the sample loop in `main`. Both share the one CPU core by
+//! `await`ing timers instead of busy-waiting, which gives the executor a chance to run the
+//! other task.
+//!
+//! Deadband test (off unless `MOTOR_TEST_ENABLED`), after calibration: each motor in turn,
+//! forward then backward, ramps the PWM duty up from 20 % to 50 % and back down to 10 % in
+//! 2 % steps (0.5 s each), then
 //! stops for 1 s (see `motor_test_step`). Watch the wheel and note at which logged duty it
 //! starts turning on the way up and stops on the way down. The sequence runs twice, then
 //! both motors stay off. The IMU CSV is paused during the test, so the `# motor ...` lines
@@ -30,6 +34,8 @@ use balance_core::{
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
 };
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     Blocking,
@@ -41,8 +47,8 @@ use esp_hal::{
         channel::{self, Channel, ChannelIFace},
         timer::{self, TimerIFace},
     },
-    main,
-    time::{Duration, Instant, Rate},
+    time::Rate,
+    timer::timg::TimerGroup,
 };
 use esp_println::println;
 use icm42670::{AccelRange, Address, GyroRange, Icm42670, prelude::*};
@@ -253,13 +259,10 @@ fn output_low<'d>(pin: impl OutputPin + 'd) -> Output<'d> {
     Output::new(pin, Level::Low, OutputConfig::default())
 }
 
-/// Busy-wait. Fine for now; later steps replace this with async Embassy timers.
-fn wait_until(deadline: Instant) {
-    while Instant::now() < deadline {}
-}
-
-#[main]
-fn main() -> ! {
+/// `#[esp_rtos::main]` sets up the Embassy executor and runs this as its first task.
+/// `spawner` starts more tasks.
+#[esp_rtos::main]
+async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
     // L298N inputs: drive all of them low first thing. Until this point they float, and a
@@ -283,7 +286,7 @@ fn main() -> ! {
         clock_source: timer::LSClockSource::APBClk,
         frequency: MOTOR_PWM_FREQUENCY,
     }) {
-        halt(format_args!("PWM timer setup failed: {e:?}"));
+        halt(format_args!("PWM timer setup failed: {e:?}")).await;
     }
     let pwm_channel = |number, pin: AnyPin<'static>| {
         let mut channel = ledc.channel::<LowSpeed>(number, pin);
@@ -300,7 +303,7 @@ fn main() -> ! {
         pwm_channel(channel::Number::Channel1, peripherals.GPIO6.into()),
     ) {
         (Ok(ena), Ok(enb)) => (ena, enb),
-        (Err(e), _) | (_, Err(e)) => halt(format_args!("PWM channel setup failed: {e:?}")),
+        (Err(e), _) | (_, Err(e)) => halt(format_args!("PWM channel setup failed: {e:?}")).await,
     };
     let mut left = Motor {
         en: ena,
@@ -313,7 +316,18 @@ fn main() -> ! {
         in_b: right_in.1,
     };
 
-    let mut led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
+    // Embassy timers need a time source: esp-rtos drives them from hardware timer 0 of
+    // timer group 0, and uses a software interrupt to wake the executor when one expires.
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+
+    let led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
+    // Calling a task function only builds it; that fails if the task is already running
+    // (each task has one static slot). `spawn` then hands it to the executor.
+    match blink(led) {
+        Ok(task) => spawner.spawn(task),
+        Err(e) => println!("# blink task not started: {e:?}"),
+    }
 
     // Battery voltage on GPIO4 = ADC1 channel 4. 11 dB attenuation gives an input range of
     // about 0-2.5 V on the C3 (a full pack puts ~2.1 V on the pin). `AdcCalCurve` corrects
@@ -348,19 +362,19 @@ fn main() -> ! {
         I2cConfig::default().with_frequency(Rate::from_khz(400)),
     ) {
         Ok(i2c) => i2c.with_sda(peripherals.GPIO10).with_scl(peripherals.GPIO8),
-        Err(e) => halt(format_args!("I2C config rejected: {e:?}")),
+        Err(e) => halt(format_args!("I2C config rejected: {e:?}")).await,
     };
 
     // `new` checks WHO_AM_I and switches accel + gyro on (the chip powers up asleep).
     let mut imu = match Icm42670::new(i2c, Address::Primary) {
         Ok(imu) => imu,
-        Err(e) => halt(format_args!("IMU not found at 0x68: {e:?}")),
+        Err(e) => halt(format_args!("IMU not found at 0x68: {e:?}")).await,
     };
     if let Err(e) = imu
         .set_accel_range(ACCEL_RANGE)
         .and_then(|()| imu.set_gyro_range(GYRO_RANGE))
     {
-        halt(format_args!("IMU range setup failed: {e:?}"));
+        halt(format_args!("IMU range setup failed: {e:?}")).await;
     }
 
     // Compare once: the driver's reads (one I2C transaction per byte, 12 per sample) with
@@ -377,19 +391,19 @@ fn main() -> ! {
     );
 
     // Gyro bias: average ~2 s of samples while the robot is still, and retry until the
-    // robot was still enough. The LED stays on while calibrating.
-    led.set_high();
+    // robot was still enough.
     let bias: GyroBias = loop {
         println!("# calibrating gyro bias: keep the robot still...");
         let mut calibrator = BiasCalibrator::new();
-        let mut next = Instant::now();
+        // A Ticker fires on a fixed schedule (every SAMPLE_PERIOD since it was created),
+        // so the rate stays exact even though each iteration takes a little time.
+        let mut ticker = Ticker::every(SAMPLE_PERIOD);
         for _ in 0..CALIBRATION_SAMPLES {
-            next += SAMPLE_PERIOD;
             match read_imu(&mut i2c) {
                 Ok(sample) => calibrator.add(gyro_dps(sample.gyro)),
                 Err(e) => println!("# gyro read failed: {e:?}"),
             }
-            wait_until(next);
+            ticker.next().await;
         }
         match calibrator.finish(CALIBRATION_SAMPLES, CALIBRATION_MAX_SPREAD_DPS) {
             Ok(bias) => break bias,
@@ -429,10 +443,9 @@ fn main() -> ! {
     // ever adds up rate × dt. Any leftover bias adds up too, so this drifts.
     let mut gyro_pitch: Option<f32> = None;
 
-    let mut next = Instant::now();
+    let mut ticker = Ticker::every(SAMPLE_PERIOD);
     let mut sample: u32 = 0;
     loop {
-        next += SAMPLE_PERIOD;
         // Wraps after ~500 days at 100 Hz; the only effect is one irregular log gap.
         sample = sample.wrapping_add(1);
 
@@ -469,7 +482,7 @@ fn main() -> ! {
             }
         }
 
-        let t_us = Instant::now().duration_since_epoch().as_micros();
+        let t_us = Instant::now().as_micros();
 
         // Read every sample even when it isn't logged: later steps feed each one into the
         // filter and the control loop. Read errors are always logged.
@@ -493,15 +506,27 @@ fn main() -> ! {
             Err(e) => println!("# IMU read failed: {e:?}"),
         }
 
+        // Wait for the next tick. While main waits here, the executor runs other tasks.
+        ticker.next().await;
+    }
+}
+
+/// Blinks the LED once a second: 0.5 s on, 0.5 s off, forever.
+///
+/// The `Output` is `'static` because a task may outlive `main`'s stack frame as far as
+/// the compiler knows; the peripherals from `esp_hal::init` are `'static`.
+#[embassy_executor::task]
+async fn blink(mut led: Output<'static>) {
+    loop {
         led.toggle();
-        wait_until(next);
+        Timer::after(Duration::from_millis(500)).await;
     }
 }
 
 /// Setup failed: keep printing why, so the message shows up even if the monitor attaches late.
-fn halt(reason: core::fmt::Arguments) -> ! {
+async fn halt(reason: core::fmt::Arguments<'_>) -> ! {
     loop {
         println!("# FATAL: {reason}");
-        wait_until(Instant::now() + Duration::from_secs(1));
+        Timer::after(Duration::from_secs(1)).await;
     }
 }

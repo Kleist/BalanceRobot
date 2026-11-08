@@ -106,7 +106,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] See a "hello" log over USB-Serial-JTAG
 - [x] Blink the LED on GPIO7 (blocking delay)
 - [x] Read raw accelerometer + gyro values from the IMU and log them as CSV at ~100 Hz (done before the Embassy blink and I2C scan)
-- [ ] Same blink with Embassy (async task + timer)
+- [x] Same blink with Embassy (async task + timer)
 - [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
 - [x] Accel pitch math in `balance-core` (`attitude::accel_pitch_deg`), unit tested
 - [x] Pitch angle from the accelerometer only (see how noisy it is)
