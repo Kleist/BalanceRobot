@@ -89,7 +89,7 @@ cargo build --release
 ## Software stack
 
 - `esp-hal` + Embassy (no_std), async
-- LEDC for motor PWM on both channels (needs esp-hal's `unstable` feature; the C3 has no MCPWM). 1 kHz, 10-bit; TT motors start turning at ~40 % duty
+- LEDC for motor PWM on both channels (needs esp-hal's `unstable` feature; the C3 has no MCPWM). 1 kHz, 10-bit. Measured deadband in "Known limitations" below
 - `icm42670` crate for the onboard IMU (embedded-hal). v0.2 reads each register byte in its own I2C transaction (12 per accel+gyro sample, high/low bytes not read atomically): fine for logging, too slow and tear-prone for a 500 Hz loop
 - IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s. Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
 - The onboard IMU interrupt is probably not broken out: drive the control loop from an Embassy ticker at ~500 Hz and poll the IMU
@@ -119,7 +119,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] One motor, one direction, full speed (wheels off the ground)
 - [x] Both motors, both directions, full speed (no PWM yet)
 - [x] PWM speed control via LEDC
-- [ ] Measure the PWM deadband of both motors
+- [x] Measure the PWM deadband of both motors
 - [ ] Battery voltage via ADC on GPIO4
 - [x] PID controller math in `balance-core` (`pid::Pid`: output limits, anti-windup, derivative on measurement), unit tested
 - [ ] Simulation: host-only `sim/` crate (std, root workspace) with an inverted-pendulum-on-wheels physics model, no controller yet; unit test that an upright robot falls at the rate the physics predicts
@@ -135,3 +135,11 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 
 - No encoders: can do tilt control only, no speed/position hold, so expect drift. Partial mitigation: feed back the integrated motor command.
 - TT motor gear backlash will make tuning harder.
+- Large PWM deadband with hysteresis (1 kHz PWM, 2S pack, wheels off the ground, 2 % steps; measured 2026-11-08). A standing wheel needs 30-36 % duty to start; a turning wheel keeps going down to 12-14 %:
+
+  | Motor | Direction | Starts at | Stops at |
+  |---|---|---|---|
+  | Left | Forward | 36 % | 14 % |
+  | Left | Backward | 32 % | 13 % |
+  | Right | Forward | 30 % | 12 % |
+  | Right | Backward | 34 % | 14 % |

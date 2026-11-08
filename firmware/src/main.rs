@@ -7,10 +7,12 @@
 //! After that the LED toggles on every sample, so a steady glow/flicker means the
 //! loop is running.
 //!
-//! Motor test, after calibration: each motor in turn ramps up forward, then backward, in
-//! PWM steps of 10 % (0.5 s each), with a 1 s stop after each ramp (see `motor_test_step`).
-//! The whole sequence runs twice, then both motors stay off while the IMU log goes on.
-//! `# motor ...` lines in the log mark each step. Keep the wheels off the ground.
+//! Deadband test, after calibration: each motor in turn, forward then backward, ramps the
+//! PWM duty up from 20 % to 50 % and back down to 10 % in 2 % steps (0.5 s each), then
+//! stops for 1 s (see `motor_test_step`). Watch the wheel and note at which logged duty it
+//! starts turning on the way up and stops on the way down. The sequence runs twice, then
+//! both motors stay off. The IMU CSV is paused during the test, so the `# motor ...` lines
+//! are easy to follow. Keep the wheels off the ground.
 
 #![no_std]
 #![no_main]
@@ -62,12 +64,19 @@ const CALIBRATION_MAX_SPREAD_DPS: f32 = 5.0;
 /// Revisit once the deadband has been measured.
 const MOTOR_PWM_FREQUENCY: Rate = Rate::from_khz(1);
 
-/// Motor test: how long each speed step lasts.
+/// Motor test: how long each duty step lasts. Long enough to see whether the wheel
+/// turns (a TT motor spins up in well under 0.1 s).
 const MOTOR_TEST_STEP_MS: u64 = 500;
-/// Duty steps per ramp: 10 %, 20 %, ..., 100 %.
-const MOTOR_TEST_DUTY_STEPS: u64 = 10;
-/// Stopped steps after each ramp. The stop means a motor never reverses at speed, which
-/// would draw a large current spike and could brown out the battery.
+/// Each ramp goes up from `START` to `PEAK`, then down to `END`, in `STEP` increments.
+/// The TT motors start at about 40 %, so the ramp brackets that with some margin. Going
+/// back down shows where a turning wheel stops, which is usually lower than where a
+/// standing wheel starts (static friction is higher than sliding friction).
+const RAMP_START_PCT: u8 = 20;
+const RAMP_PEAK_PCT: u8 = 50;
+const RAMP_END_PCT: u8 = 10;
+const RAMP_STEP_PCT: u8 = 2;
+/// Stopped steps after each ramp. The stop means a motor never reverses while turning,
+/// which would draw a large current spike and could brown out the battery.
 const MOTOR_TEST_STOP_STEPS: u64 = 2;
 /// The ramps in one pass of the test.
 const MOTOR_TEST_RAMPS: [(Side, Direction); 4] = [
@@ -94,11 +103,18 @@ enum Direction {
     Backward,
 }
 
+/// Whether the duty is going up or down in the current ramp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ramp {
+    Up,
+    Down,
+}
+
 /// What the motor test does during one step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestStep {
     /// Run one motor in one direction at this duty cycle (percent); the other is off.
-    Run(Side, Direction, u8),
+    Run(Side, Direction, Ramp, u8),
     /// Both motors off, between ramps.
     Stop,
     /// The test is over: both motors off for good.
@@ -107,23 +123,30 @@ enum TestStep {
 
 /// The motor test as a function of the step number (one step per `MOTOR_TEST_STEP_MS`).
 fn motor_test_step(step: u64) -> TestStep {
-    let steps_per_ramp = MOTOR_TEST_DUTY_STEPS + MOTOR_TEST_STOP_STEPS;
+    let up_steps = u64::from((RAMP_PEAK_PCT - RAMP_START_PCT) / RAMP_STEP_PCT) + 1;
+    let down_steps = u64::from((RAMP_PEAK_PCT - RAMP_END_PCT) / RAMP_STEP_PCT);
+    let steps_per_ramp = up_steps + down_steps + MOTOR_TEST_STOP_STEPS;
     let ramps_per_pass = MOTOR_TEST_RAMPS.len() as u64;
     let ramp = step / steps_per_ramp;
     if ramp >= ramps_per_pass * MOTOR_TEST_PASSES {
         return TestStep::Done;
     }
     let within_ramp = step % steps_per_ramp;
-    if within_ramp >= MOTOR_TEST_DUTY_STEPS {
+    // All conversions below are of small numbers (< 4, <= 100), so they can't fail.
+    let (ramp_dir, duty_pct) = if within_ramp < up_steps {
+        let offset = u8::try_from(within_ramp).unwrap_or(0) * RAMP_STEP_PCT;
+        (Ramp::Up, RAMP_START_PCT + offset)
+    } else if within_ramp < up_steps + down_steps {
+        let offset = u8::try_from(within_ramp - up_steps + 1).unwrap_or(0) * RAMP_STEP_PCT;
+        (Ramp::Down, RAMP_PEAK_PCT - offset)
+    } else {
         return TestStep::Stop;
-    }
-    // Both conversions are of small numbers (< 4 and <= 100), so they can't fail.
+    };
     let (side, direction) = usize::try_from(ramp % ramps_per_pass)
         .ok()
         .and_then(|i| MOTOR_TEST_RAMPS.get(i).copied())
         .unwrap_or((Side::Left, Direction::Forward));
-    let duty_pct = u8::try_from((within_ramp + 1) * 100 / MOTOR_TEST_DUTY_STEPS).unwrap_or(0);
-    TestStep::Run(side, direction, duty_pct)
+    TestStep::Run(side, direction, ramp_dir, duty_pct)
 }
 
 /// One L298N channel: PWM on EN sets the speed (the duty cycle is the fraction of time
@@ -320,8 +343,8 @@ fn main() -> ! {
         if motor_step != Some(step) {
             motor_step = Some(step);
             let result = match step {
-                TestStep::Run(side, direction, duty_pct) => {
-                    println!("# motor {side:?} {direction:?} {duty_pct}%");
+                TestStep::Run(side, direction, ramp, duty_pct) => {
+                    println!("# motor {side:?} {direction:?} {ramp:?} {duty_pct}%");
                     match side {
                         Side::Left => left.run(direction, duty_pct),
                         Side::Right => right.run(direction, duty_pct),
@@ -346,7 +369,10 @@ fn main() -> ! {
         // Read every sample even when it isn't logged: later steps feed each one into the
         // filter and the control loop. Read errors are always logged.
         match (imu.accel_raw(), imu.gyro_raw()) {
-            (Ok(a), Ok(g)) if sample.is_multiple_of(LOG_EVERY_N_SAMPLES) => {
+            (Ok(a), Ok(g))
+                if motor_step == Some(TestStep::Done)
+                    && sample.is_multiple_of(LOG_EVERY_N_SAMPLES) =>
+            {
                 let (forward, up) = robot_axes(a);
                 let pitch = accel_pitch_deg(forward, up);
                 let [rx, ry, rz] = bias.apply(gyro_dps(g));
