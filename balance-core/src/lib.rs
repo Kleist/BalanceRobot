@@ -6,6 +6,7 @@
 #![no_std]
 
 pub mod attitude;
+pub mod battery;
 pub mod gyro;
 pub mod pid;
 
