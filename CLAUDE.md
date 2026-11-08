@@ -91,7 +91,7 @@ cargo build --release
 - `esp-hal` + Embassy (no_std), async
 - LEDC for motor PWM on both channels (needs esp-hal's `unstable` feature; the C3 has no MCPWM). 1 kHz, 10-bit. Measured deadband in "Known limitations" below
 - `icm42670` crate for the onboard IMU (embedded-hal), used only for setup (WHO_AM_I, power, ranges): v0.2 reads each register byte in its own I2C transaction, which is slow and tears values. After setup the firmware takes the bus back (`free()`) and burst-reads all 12 data bytes from 0x0B in one transaction; decoding is `balance_core::imu::RawSample`
-- IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps,gyro_pitch_deg,filter_pitch_deg`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s, then the pitch from integrating the gyro alone (starts at the accel pitch, drifts), then the complementary-filter pitch. Sampled at 500 Hz, logged at 10 lines/s; `# loop busy max N us of 2000 us` once a second. Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
+- IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps,gyro_pitch_deg,filter_pitch_deg`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s, then the pitch from integrating the gyro alone (starts at the accel pitch, drifts), then the complementary-filter pitch. Sampled at 500 Hz, logged at 10 lines/s; `# loop max us: busy N of 2000, imu ..., battery adc ..., battery print ..., csv print ..., stats print ...` once a second (longest time per part since the last such line). Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
 - The onboard IMU interrupt is probably not broken out: drive the control loop from an Embassy ticker at ~500 Hz and poll the IMU
 - BLE later. **ESP32-C3 is BLE only (no Classic BT / SPP)**, so the Android app must use GATT
 
@@ -107,7 +107,6 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Blink the LED on GPIO7 (blocking delay)
 - [x] Read raw accelerometer + gyro values from the IMU and log them as CSV at ~100 Hz (done before the Embassy blink and I2C scan)
 - [x] Same blink with Embassy (async task + timer)
-- [ ] I2C bus scan: find ICM-42670-P (0x68) and SHTC3 (0x70)
 - [x] Accel pitch math in `balance-core` (`attitude::accel_pitch_deg`), unit tested
 - [x] Pitch angle from the accelerometer only (see how noisy it is)
 - [x] Gyro bias calibration math in `balance-core` (`gyro::BiasCalibrator`), unit tested
@@ -116,6 +115,8 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Burst-read the IMU (one I2C transaction per sample) so it keeps up with the control loop
 - [x] Complementary filter math in `balance-core` (`attitude::ComplementaryFilter`), unit tested
 - [x] Complementary filter combining both, fixed-rate loop (~500 Hz ticker)
+- [x] Measure what each 500 Hz iteration spends its time on (IMU read, battery ADC, logging): the loop overran (max ~3000 us of 2000 us). Max per part: IMU burst read ~490 us, battery ADC (16 readings) ~730 us, battery println ~360 us, CSV println ~1700-2100 us, stats println ~330 us. Printing costs ~11-14 us per byte, partly soft-float formatting (the C3 has no FPU), so IMU + one CSV line already overruns
+- [ ] Logging off the control path: the loop pushes raw numbers into a queue (`embassy_sync::Channel`); a log task formats and writes them with the async USB-Serial-JTAG driver. Formatting has no `.await`, so the control loop must run on a higher-priority (interrupt) executor to preempt it. Spread the battery ADC readings over iterations
 - [x] One motor, one direction, full speed (wheels off the ground)
 - [x] Both motors, both directions, full speed (no PWM yet)
 - [x] PWM speed control via LEDC
