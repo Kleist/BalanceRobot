@@ -23,6 +23,7 @@ This repo starts by reviving an **old prototype chassis** as a test bed. Code de
 |---|---|
 | MCU | **ESP32-C3-DevKit-RUST-1 v1.2a** (ESP32-C3-MINI-1), replacing the old RF-Nano (ATmega328P + nRF24) |
 | IMU | Onboard **ICM-42670-P** @ I2C 0x68 (preferred). Also available: GY-521 / MPU-6050 module on the chassis, also 0x68 by default |
+| IMU mounting | Board stands upright: **+X up, +Z forward, +Y right** (axle = Y). Pitch = `atan2(-az, ax)`, pitch rate = `-gy`. Balance point (held by hand) at −3.8° accel pitch, subtracted as `BALANCE_PITCH_DEG` |
 | Other onboard | SHTC3 temp/humidity @ 0x70, WS2812 RGB LED on GPIO2, LED on GPIO7 |
 | Motor driver | L298N dual H-bridge module, onboard 5V regulator enabled (CON5 jumper fitted). ENA/ENB jumpers removed (enable pins wired out for PWM) |
 | Motors | 2x yellow "TT" gear motors, 65 mm wheels, **no encoders** |
@@ -132,6 +133,11 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [ ] Control step in `balance-core` (e.g. `Controller::step(imu_sample, dt) -> motor_cmd`) so firmware and simulator run the same code
 - [ ] Simulation: close the loop (complementary filter + PID at 500 Hz) and tune P, D, I in simulation
 - [ ] Simulation: motor model (PWM deadband, saturation, battery sag, gear backlash) and a "stays upright" test in CI; refine parameters with numbers measured on the robot
+- [x] Check the IMU axes and the balance point with the robot upright (balanced = 0°, forward = positive): +X up, +Z forward, pitch rate = −gy, balance point −3.8°
+- [ ] Signed motor command `Motor::set(-1.0..=1.0)` (via `clamp_duty`); check +1 drives the robot forward on both wheels
+- [ ] Deadband + battery-voltage compensation of the motor command (math in `balance-core`); re-measure the deadband at a known battery voltage
+- [ ] Safety cut-offs: motors off when fallen (|pitch| > ~45°) and on low battery (warn < ~6.6 V, off < ~6.4 V)
+- [ ] Sign check with the wheels in the air: tiny-gain "wheels follow the tilt", tilting forward spins the wheels forward
 - [ ] P-only tilt loop, then add D, then I; tuning
 - [ ] BLE: advertise and show up on the phone
 - [ ] BLE GATT control (steering / setpoint) from Android
