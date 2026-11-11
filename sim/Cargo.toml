@@ -10,5 +10,7 @@ publish = false
 [lints]
 workspace = true
 
-# No dependencies: the model is a handful of f64s and one formula.
 [dependencies]
+# The simulator runs the firmware's own processing (calibration, filters, later the
+# controller), so it shares the code instead of copying it.
+balance-core = { path = "../balance-core" }
