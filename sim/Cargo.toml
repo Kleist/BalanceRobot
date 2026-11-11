@@ -1,0 +1,14 @@
+[package]
+name = "sim"
+version = "0.1.0"
+description = "Host-only simulation of the balance robot (physics now; sensors, motors and the controller later)"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# No dependencies: the model is a handful of f64s and one formula.
+[dependencies]
