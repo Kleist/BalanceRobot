@@ -27,6 +27,7 @@ This repo starts by reviving an **old prototype chassis** as a test bed. Code de
 | Motor driver | L298N dual H-bridge module, onboard 5V regulator enabled (CON5 jumper fitted). ENA/ENB jumpers removed (enable pins wired out for PWM) |
 | Motors | 2x yellow "TT" gear motors, 65 mm wheels, **no encoders** |
 | Battery | 2x 18650 in series (2S, 6.4-8.4 V), feeds L298N motor supply |
+| Body (measured 2026-11-11) | 350 g total, centre of mass 8 cm above the axle, swings with T = 0.70 s hanging upside down -> I ~ 0.0034 kg m^2 about the axle, fall time constant tau = T/2pi ~ 0.11 s (1 deg -> 10 deg in ~0.33 s with the axle held still). Wheels can't be weighed separately |
 
 ## Board I2C bus (fixed by board design)
 
@@ -65,6 +66,7 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 ## Project layout & checks
 
 - `balance-core/` - all logic that doesn't touch hardware (filters, PID, motor mapping, battery math). `#![no_std]`, no hardware deps, unit-tested on the host. Put as much code here as possible.
+- `sim/` - host-only (`std`) simulation of the robot, in the root workspace. So far: body physics (`sim::pendulum`, inverted pendulum with the axle acceleration as input); `cargo run -p sim --example fall` prints a fall from 1 deg.
 - `firmware/` - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target (its `.cargo/config.toml` sets the target, linker script and `espflash` runner). `cd firmware && cargo run --release` builds, flashes and opens the log monitor; flashing needs the user in the `dialout` group.
 - Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests), mirrored in `firmware/Cargo.toml`; keep the two in sync. CI treats warnings as errors.
 - Toolchain is pinned in `rust-toolchain.toml`.
@@ -125,7 +127,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Measure the PWM deadband of both motors
 - [x] Battery voltage via ADC on GPIO4
 - [x] PID controller math in `balance-core` (`pid::Pid`: output limits, anti-windup, derivative on measurement), unit tested
-- [ ] Simulation: host-only `sim/` crate (std, root workspace) with an inverted-pendulum-on-wheels physics model, no controller yet; unit test that an upright robot falls at the rate the physics predicts
+- [x] Simulation: host-only `sim/` crate (std, root workspace) with an inverted-pendulum-on-wheels physics model (axle acceleration as input, motors ideal), no controller yet; unit test that an upright robot falls at the rate the physics predicts
 - [ ] Simulation: IMU sensor model (noise, bias, quantisation in the firmware's LSB units), output CSV in the firmware log format
 - [ ] Control step in `balance-core` (e.g. `Controller::step(imu_sample, dt) -> motor_cmd`) so firmware and simulator run the same code
 - [ ] Simulation: close the loop (complementary filter + PID at 500 Hz) and tune P, D, I in simulation
