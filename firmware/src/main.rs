@@ -96,6 +96,12 @@ const DT_S: f32 = 0.002;
 const LOG_EVERY_N_SAMPLES: u32 = 50;
 /// Log the loop's busy time once per this many samples: 500 = once a second.
 const LOOP_STATS_EVERY_N_SAMPLES: u32 = 500;
+/// The accelerometer pitch at the robot's balance point (centre of mass above the axle),
+/// held by hand: −3.8°. Subtracted from the accelerometer pitch, so 0° = balanced and all
+/// pitch columns in the log are relative to that. Refine once the robot balances: if it
+/// keeps rolling forward while holding 0°, it is really leaning forward there, so the
+/// true balance point is further back: lower this value (and vice versa).
+const BALANCE_PITCH_DEG: f32 = -3.8;
 /// Complementary filter time constant: changes faster than this come from the gyro,
 /// slower ones from the accelerometer. 0.5 s is a common starting point; tune later.
 const FILTER_TAU_S: f32 = 0.5;
@@ -249,31 +255,30 @@ fn gyro_dps(g: [i16; 3]) -> [f32; 3] {
 
 /// Map the IMU's X/Y/Z to the robot's `(forward, up)`, including signs.
 ///
-/// This depends on how the board is mounted, which we have not checked yet. Best guess:
-/// board lying flat with the components on top (so +Z is up) and +X pointing forward.
+/// The board stands upright on the chassis: **+X points up, +Z forward, +Y to the
+/// right** (so the axle is Y). Measured with the robot held still (1 g = 8192 LSB):
 ///
-/// How to check it in the log (±4 g range, so 1 g = 8192 LSB):
-/// 1. Hold the robot upright and still. The axis reading about +8192 is "up" (if it
-///    reads about -8192, use it negated). `pitch_deg` should then be about 0.
-/// 2. Tilt the robot forward (nose down). The forward value must go negative and
-///    `pitch_deg` positive. If the signs are reversed, negate forward; if a different
-///    axis changes, use that one as forward.
+/// | Position | ax | ay | az |
+/// |---|---|---|---|
+/// | Upright (balance point) | +8169 | −147 | +540 |
+/// | Tilted forward ~40° | +6011 | −196 | −5469 |
+/// | Tilted backward ~40° | +5950 | −40 | +5711 |
+///
+/// Upright, X reads +1 g, so +X is up. Tipping forward points +Z towards the ground, so
+/// `az` goes negative, which is what `accel_pitch_deg` expects of the forward axis.
 fn robot_axes(a: [i16; 3]) -> (f32, f32) {
-    let forward = f32::from(a[0]);
-    let up = f32::from(a[2]);
+    let forward = f32::from(a[2]);
+    let up = f32::from(a[0]);
     (forward, up)
 }
 
 /// The robot's pitch rate in °/s (positive = tipping forward) from the gyro's `[x, y, z]`.
 ///
-/// Pitching rotates the robot about its wheel axle, which is the axis perpendicular to
-/// both forward and up: Y, if `robot_axes` is right. By the right-hand rule a positive
-/// rotation about +Y turns +X (forward) towards −Z (down), i.e. tips forward, so no sign
-/// flip. Check it with the log: tilt the robot slowly forward and back, and
-/// `gyro_pitch_deg` must move the same way as `pitch_deg`. If it moves the opposite way,
-/// negate the rate.
+/// Pitching rotates the robot about its wheel axle, Y (see `robot_axes`). Tipping forward
+/// turns +Z (forward) towards −X (down). By the right-hand rule a positive rotation about
+/// +Y turns +Z towards +X, the other way, so tipping forward is a *negative* Y rate.
 fn robot_pitch_rate(rates_dps: [f32; 3]) -> f32 {
-    rates_dps[1]
+    -rates_dps[1]
 }
 
 /// Longest time in µs, per part of the sample loop, since the last `# loop max` line.
@@ -777,7 +782,7 @@ async fn control_loop(parts: ControlParts) {
         match imu_result {
             Ok(raw) => {
                 let (forward, up) = robot_axes(raw.accel);
-                let pitch = accel_pitch_deg(forward, up);
+                let pitch = accel_pitch_deg(forward, up) - BALANCE_PITCH_DEG;
                 let rates = bias.apply(gyro_dps(raw.gyro));
                 let gyro_pitch = gyro_pitch.get_or_insert(pitch);
                 *gyro_pitch += robot_pitch_rate(rates) * DT_S;
