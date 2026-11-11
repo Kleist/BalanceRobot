@@ -118,7 +118,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Measure what each 500 Hz iteration spends its time on (IMU read, battery ADC, logging): the loop overran (max ~3000 us of 2000 us). Max per part: IMU burst read ~490 us, battery ADC (16 readings) ~730 us, battery println ~360 us, CSV println ~1700-2100 us, stats println ~330 us. Printing costs ~11-14 us per byte, partly soft-float formatting (the C3 has no FPU), so IMU + one CSV line already overruns
 - [x] Logging off the control path: the loop pushes raw numbers into a queue (`embassy_sync::Channel`); a log task formats and writes them with the async USB-Serial-JTAG driver. Measure how late the ticks start
 - [x] Run the control loop on a higher-priority interrupt executor, so it preempts the log task's formatting (which has no `.await`). Tick lateness: up to ~350 us with the log task on the same executor, ~100-120 us on the interrupt executor (mostly constant wake-up overhead; jitter ~20 us). Busy ~1300 of 2000 us
-- [ ] Spread the battery ADC readings over iterations (one per iteration, averaged), instead of 16 at once (~730 us)
+- [x] Spread the battery ADC readings over iterations (one non-blocking `read_oneshot` per iteration, averaged over 16 = 64 ms), instead of 16 at once (~730 us)
 - [x] One motor, one direction, full speed (wheels off the ground)
 - [x] Both motors, both directions, full speed (no PWM yet)
 - [x] PWM speed control via LEDC
