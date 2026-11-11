@@ -66,7 +66,7 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 ## Project layout & checks
 
 - `balance-core/` - all logic that doesn't touch hardware (filters, PID, motor mapping, battery math). `#![no_std]`, no hardware deps, unit-tested on the host. Put as much code here as possible.
-- `sim/` - host-only (`std`) simulation of the robot, in the root workspace. So far: body physics (`sim::pendulum`, inverted pendulum with the axle acceleration as input); `cargo run -p sim --example fall` prints a fall from 1 deg.
+- `sim/` - host-only (`std`) simulation of the robot, in the root workspace, depends on `balance-core`. So far: body physics (`sim::pendulum`, inverted pendulum with the axle acceleration as input), IMU model (`sim::imu`: specific force at the chip incl. tangential/centripetal terms, bias, Gaussian noise, quantisation to LSB; `ImuParams::prototype()` values are **placeholders**, not measured yet), and the firmware's log pipeline + CSV format (`sim::log`, copies the firmware's constants and axis mapping until the control step moves them to `balance-core`). Examples: `fall` (pitch table), `imu_log [fall]` (simulated firmware log), `log_stats < file.log` (mean/std of the raw columns of a real or simulated log).
 - `firmware/` - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target (its `.cargo/config.toml` sets the target, linker script and `espflash` runner). `cd firmware && cargo run --release` builds, flashes and opens the log monitor; flashing needs the user in the `dialout` group.
 - Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests), mirrored in `firmware/Cargo.toml`; keep the two in sync. CI treats warnings as errors.
 - Toolchain is pinned in `rust-toolchain.toml`.
@@ -128,7 +128,8 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Battery voltage via ADC on GPIO4
 - [x] PID controller math in `balance-core` (`pid::Pid`: output limits, anti-windup, derivative on measurement), unit tested
 - [x] Simulation: host-only `sim/` crate (std, root workspace) with an inverted-pendulum-on-wheels physics model (axle acceleration as input, motors ideal), no controller yet; unit test that an upright robot falls at the rate the physics predicts
-- [ ] Simulation: IMU sensor model (noise, bias, quantisation in the firmware's LSB units), output CSV in the firmware log format
+- [x] Simulation: IMU sensor model (noise, bias, quantisation in the firmware's LSB units), output CSV in the firmware log format
+- [ ] Measure the IMU noise/bias (still log + `log_stats`) and the IMU height above the axle; put them into `ImuParams::prototype()`
 - [ ] Control step in `balance-core` (e.g. `Controller::step(imu_sample, dt) -> motor_cmd`) so firmware and simulator run the same code
 - [ ] Simulation: close the loop (complementary filter + PID at 500 Hz) and tune P, D, I in simulation
 - [ ] Simulation: motor model (PWM deadband, saturation, battery sag, gear backlash) and a "stays upright" test in CI; refine parameters with numbers measured on the robot
