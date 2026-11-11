@@ -105,7 +105,8 @@ const BATTERY_DIVIDER: Divider = Divider {
     top_ohm: 100_000.0,
     bottom_ohm: 33_000.0,
 };
-/// ADC readings averaged per battery measurement, to smooth out ADC noise.
+/// ADC readings averaged per battery measurement, to smooth out ADC noise. The loop gets
+/// one reading per two iterations (4 ms), so a new average comes every 16 × 4 ms = 64 ms.
 const BATTERY_AVERAGE: u32 = 16;
 /// Log the battery voltage once per this many samples: 250 = every 0.5 s.
 const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 250;
@@ -375,25 +376,52 @@ fn read_imu(i2c: &mut I2c<'_, Blocking>) -> Result<RawSample, I2cError> {
 struct Battery {
     adc: Adc<'static, ADC1<'static>, Blocking>,
     pin: AdcPin<GPIO4<'static>, ADC1<'static>, AdcCalCurve<ADC1<'static>>>,
+    /// Sum and count of the readings `poll` has collected for the next average.
+    sum: u32,
+    count: u32,
 }
 
 impl Battery {
-    /// Averages `BATTERY_AVERAGE` readings; returns `(battery_v, pin_mv)`.
-    fn read(&mut self) -> (f32, u16) {
-        let mut sum: u32 = 0;
-        for _ in 0..BATTERY_AVERAGE {
-            // `read_oneshot` doesn't wait: it starts a conversion and returns `WouldBlock`
-            // until the result is ready (a few µs), so poll it.
-            let pin_mv = loop {
-                if let Ok(mv) = self.adc.read_oneshot(&mut self.pin) {
-                    break mv;
-                }
-            };
-            sum += u32::from(pin_mv);
+    fn new(
+        adc: Adc<'static, ADC1<'static>, Blocking>,
+        pin: AdcPin<GPIO4<'static>, ADC1<'static>, AdcCalCurve<ADC1<'static>>>,
+    ) -> Self {
+        Self {
+            adc,
+            pin,
+            sum: 0,
+            count: 0,
+        }
+    }
+
+    /// Takes `BATTERY_AVERAGE` readings right away and averages them; returns
+    /// `(battery_v, pin_mv)`. Busy-waits for each conversion (~45 µs each), so only for
+    /// startup, not for the 500 Hz loop.
+    fn read_blocking(&mut self) -> (f32, u16) {
+        loop {
+            if let Some(reading) = self.poll() {
+                return reading;
+            }
+        }
+    }
+
+    /// Never waits; call it once per loop iteration. `read_oneshot` starts a conversion
+    /// and returns `WouldBlock` until the result is ready; the next call (one iteration
+    /// later) picks the result up, and the call after that starts the next conversion. So
+    /// a reading costs a few µs instead of a busy-wait. Returns `(battery_v, pin_mv)`
+    /// whenever `BATTERY_AVERAGE` readings have been collected, else `None`.
+    fn poll(&mut self) -> Option<(f32, u16)> {
+        let pin_mv = self.adc.read_oneshot(&mut self.pin).ok()?;
+        self.sum += u32::from(pin_mv);
+        self.count += 1;
+        if self.count < BATTERY_AVERAGE {
+            return None;
         }
         // The mean of u16 values always fits in a u16.
-        let pin_mv = u16::try_from(sum / BATTERY_AVERAGE).unwrap_or(u16::MAX);
-        (BATTERY_DIVIDER.battery_v(pin_mv), pin_mv)
+        let mean_mv = u16::try_from(self.sum / self.count).unwrap_or(u16::MAX);
+        self.sum = 0;
+        self.count = 0;
+        Some((BATTERY_DIVIDER.battery_v(mean_mv), mean_mv))
     }
 }
 
@@ -442,11 +470,8 @@ async fn main(spawner: Spawner) {
     let mut adc_config = AdcConfig::new();
     let pin =
         adc_config.enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO4, Attenuation::_11dB);
-    let mut battery = Battery {
-        adc: Adc::new(peripherals.ADC1, adc_config),
-        pin,
-    };
-    let (battery_v, pin_mv) = battery.read();
+    let mut battery = Battery::new(Adc::new(peripherals.ADC1, adc_config), pin);
+    let (battery_v, pin_mv) = battery.read_blocking();
     println!("# battery {battery_v:.2} V (pin {pin_mv} mV)");
 
     // The board wires the IMU (and the SHTC3) to SDA = GPIO10, SCL = GPIO8, with pull-ups.
@@ -689,6 +714,8 @@ async fn control_loop(parts: ControlParts) {
     // ever adds up rate × dt. Any leftover bias adds up too, so this drifts.
     let mut gyro_pitch: Option<f32> = None;
     let mut filter = ComplementaryFilter::new(FILTER_TAU_S);
+    // The most recent battery average; `poll` updates it about every 64 ms.
+    let mut latest_battery = battery.read_blocking();
     // Longest times since the last `# loop max` line: the whole iteration and its parts.
     let mut times = LoopTimes::default();
     // Never waits: if the log task has fallen behind and the queue is full, the message is
@@ -717,10 +744,13 @@ async fn control_loop(parts: ControlParts) {
         // Wraps after ~100 days at 500 Hz; the only effect is one irregular log gap.
         sample = sample.wrapping_add(1);
 
+        let start = Instant::now();
+        if let Some(reading) = battery.poll() {
+            latest_battery = reading;
+        }
+        times.battery_adc = times.battery_adc.max(start.elapsed().as_micros());
         if sample.is_multiple_of(BATTERY_LOG_EVERY_N_SAMPLES) {
-            let start = Instant::now();
-            let (battery_v, pin_mv) = battery.read();
-            times.battery_adc = times.battery_adc.max(start.elapsed().as_micros());
+            let (battery_v, pin_mv) = latest_battery;
             log(&mut times, LogMsg::Battery { battery_v, pin_mv });
         }
 
