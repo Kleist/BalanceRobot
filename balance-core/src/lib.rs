@@ -7,6 +7,7 @@
 
 pub mod attitude;
 pub mod battery;
+pub mod control;
 pub mod gyro;
 pub mod imu;
 pub mod pid;
