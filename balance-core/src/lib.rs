@@ -26,13 +26,51 @@ pub fn clamp_duty(duty: f32) -> f32 {
     }
 }
 
+/// Splits a signed motor command into a direction and a PWM duty in whole percent.
+///
+/// Returns `(forward, duty_pct)`. The command is clamped with [`clamp_duty`] first, so
+/// the duty is always `0..=100`. A command of 0 gives duty 0 (the caller should stop the
+/// motor); the sign of 0 is meaningless then. The LEDC driver takes whole percent, so
+/// the command is rounded to the nearest 1 %.
+#[must_use]
+pub fn split_command(cmd: f32) -> (bool, u8) {
+    let cmd = clamp_duty(cmd);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "|cmd| is in 0..=1, so the rounded percent is in 0..=100"
+    )]
+    let duty_pct = (cmd.abs() * 100.0 + 0.5) as u8;
+    (cmd >= 0.0, duty_pct)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::float_cmp,
     reason = "clamp returns the exact bound or input, so exact comparison is intended"
 )]
 mod tests {
-    use super::clamp_duty;
+    use super::{clamp_duty, split_command};
+
+    #[test]
+    fn split_gives_direction_and_percent() {
+        assert_eq!(split_command(0.5), (true, 50));
+        assert_eq!(split_command(-0.25), (false, 25));
+    }
+
+    #[test]
+    fn split_rounds_to_nearest_percent() {
+        assert_eq!(split_command(0.124), (true, 12));
+        assert_eq!(split_command(-0.126), (false, 13));
+    }
+
+    #[test]
+    fn split_clamps_and_stops_on_nan() {
+        assert_eq!(split_command(3.0), (true, 100));
+        assert_eq!(split_command(-3.0), (false, 100));
+        assert_eq!(split_command(f32::NAN).1, 0);
+        assert_eq!(split_command(0.0).1, 0);
+    }
 
     #[test]
     fn passes_values_in_range_through() {
