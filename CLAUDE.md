@@ -92,7 +92,7 @@ cargo build --release
 ## Software stack
 
 - `esp-hal` + Embassy (no_std), async, via `esp-rtos`. Two executors: thread mode for setup, logging and the LED; an `InterruptExecutor` (software interrupt 1, priority 2) for the 500 Hz control loop, so it preempts everything else. Data the control task takes must be `Send` (LEDC channels aren't, so the task creates them itself)
-- LEDC for motor PWM on both channels (needs esp-hal's `unstable` feature; the C3 has no MCPWM). 1 kHz, 10-bit. Measured deadband in "Known limitations" below
+- LEDC for motor PWM on both channels (needs esp-hal's `unstable` feature; the C3 has no MCPWM). 100 Hz, 10-bit (the lowest the timer divider allows is ~78 Hz at 10-bit). Measured deadband in "Known limitations" below
 - `icm42670` crate for the onboard IMU (embedded-hal), used only for setup (WHO_AM_I, power, ranges): v0.2 reads each register byte in its own I2C transaction, which is slow and tears values. After setup the firmware takes the bus back (`free()`) and burst-reads all 12 data bytes from 0x0B in one transaction; decoding is `balance_core::imu::RawSample`
 - IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps,gyro_pitch_deg,filter_pitch_deg`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s, then the pitch from integrating the gyro alone (starts at the accel pitch, drifts), then the complementary-filter pitch. Sampled at 500 Hz, logged at 10 lines/s; `# loop max us: busy N of 2000, late ..., imu ..., battery adc ..., log send ...; dropped N` once a second (longest time per part since the last such line; `late` = how long after its scheduled time an iteration started). The sample loop doesn't print: it queues raw numbers (`LogMsg`) for the `log_writer` task, which formats them and writes via the async USB-Serial-JTAG driver; `println!` only before the loop and in `halt`. Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
 - Control pipeline: `balance_core::control::Controller` (settings in `Config::PROTOTYPE`: IMU axes, balance point, filter τ, calibration limits, PID gains kp 0.12 / ki 2.0 / kd 0.008 per degree, tuned in simulation with an ideal motor). Sign convention: pitch and motor command positive = forward; positive gains mean "tilted forward -> drive forward". The I term is essential: DC motors act like speed sources, and then tilt-only P or PD is unstable for any gains (one slow pole always stays unstable: the robot runs away until the motors saturate); ∫pitch carries the wheel-speed information that stabilises it
@@ -141,7 +141,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 **A. Drive the motors from code (firmware, wheels in the air)**
 
 - [ ] Signed motor command: `Motor::set(-1.0..=1.0)` via `balance_core::clamp_duty` (direction pins + PWM duty; 0 = stop). Check: a fixed +0.5 turns both wheels the way that drives the robot forward; record left/right and polarity in `docs/wiring.md`
-- [ ] Deadband at lower PWM frequency: rerun the existing deadband test (`MOTOR_TEST_ENABLED`) at e.g. 100 Hz and 250 Hz next to 1 kHz, noting the battery voltage. Pick the frequency with the smallest start duty; update `MOTOR_PWM_FREQUENCY` and the deadband table in "Known limitations"
+- [x] Deadband at lower PWM frequency: rerun the existing deadband test (`MOTOR_TEST_ENABLED`) at e.g. 100 Hz and 250 Hz next to 1 kHz, noting the battery voltage. Pick the frequency with the smallest start duty; update `MOTOR_PWM_FREQUENCY` and the deadband table in "Known limitations"
 - [ ] Safety cut-offs (math in `balance-core`, unit tested): motors off when fallen (|filter pitch| > ~45°, re-arm when held upright again) and on low battery (warn < ~6.6 V, off < ~6.4 V). Check: tilt past 45° and see the log report the cut-off
 
 **B. Deadband in simulation and in the controller**
@@ -169,11 +169,13 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 
 - No encoders: can do tilt control only, no speed/position hold, so expect drift. Partial mitigation: feed back the integrated motor command (bring-up plan, group D).
 - TT motor gear backlash will make tuning harder.
-- Large PWM deadband with hysteresis (1 kHz PWM, 2S pack, wheels off the ground, 2 % steps; measured 2026-11-08). A standing wheel needs 30-36 % duty to start; a turning wheel keeps going down to 12-14 %:
+- Large PWM deadband with hysteresis, wheels off the ground, 2 % steps. A standing wheel needs a minimum duty to start; a turning wheel keeps going down to a lower one. Measured 2026-11-08 and 2026-11-15 (battery voltage mostly not noted), so the numbers are only good to about ±10 points: the same 1 kHz setup gave left backward 32 % one day and 20 % the next. At 7.6 V the wheels did not start at 1 kHz even at 40 %. A lower PWM frequency helps: 100 Hz starts lower and stops lower than 1 kHz in every run, so the firmware uses 100 Hz. At 250 Hz the start duties were 20-25 % (stop not measured). The 100 Hz values are the later of two runs (the first gave 20-30 % to start):
 
-  | Motor | Direction | Starts at | Stops at |
-  |---|---|---|---|
-  | Left | Forward | 36 % | 14 % |
-  | Left | Backward | 32 % | 13 % |
-  | Right | Forward | 30 % | 12 % |
-  | Right | Backward | 34 % | 14 % |
+  | Motor | Direction | Starts at, 100 Hz | Stops at, 100 Hz | Starts at, 1 kHz (11-08) | Stops at, 1 kHz (11-08) |
+  |---|---|---|---|---|---|
+  | Left | Forward | 16 % | 8 % | 36 % | 14 % |
+  | Left | Backward | 16 % | 8 % | 32 % | 13 % |
+  | Right | Forward | 22 % | 8 % | 30 % | 12 % |
+  | Right | Backward | 20 % | 8 % | 34 % | 14 % |
+
+  Still to do: 100 / 250 / 1000 Hz back to back on one charge with the voltage noted, and the stop duties at 250 Hz and 1 kHz.
