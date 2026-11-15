@@ -20,8 +20,9 @@
 //!
 //! At startup the gyro bias is calibrated while the robot stands still.
 //! Each sample then goes through `balance_core::control::Controller` (the same code the
-//! simulator runs), which computes the pitch estimates and a motor command. The command
-//! is not applied yet: the motors stay off.
+//! simulator runs), which computes the pitch estimates and a motor command. With
+//! `CONTROL_ENABLED` the command drives both motors (while the safety cut-offs allow it
+//! and no motor test or direction check runs); otherwise the motors stay off.
 //!
 //! Runs on two Embassy executors sharing the one CPU core:
 //! - the normal (thread-mode) executor runs `main` (setup and calibration), then the `blink`
@@ -55,7 +56,7 @@
 
 use balance_core::{
     battery::Divider,
-    control::{Config, Controller, Output as ControlOutput},
+    control::{Config, Controller, Gains, Output as ControlOutput},
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
     safety::{Limits, Safety, Status},
@@ -169,6 +170,28 @@ const MOTOR_CHECK_ENABLED: bool = false;
 const MOTOR_CHECK_CMD: f32 = 0.5;
 const MOTOR_CHECK_STEP_MS: u64 = 2000;
 
+/// Apply the controller's command to both motors. Off by default, so flashing for any
+/// other reason never drives the wheels by surprise: set it to `true` on purpose, with
+/// the wheels in the air for the sign check. Ignored while `MOTOR_TEST_ENABLED` or
+/// `MOTOR_CHECK_ENABLED` is set (those own the motors then).
+const CONTROL_ENABLED: bool = false;
+
+/// Gains for the sign check (wheels in the air): P only, so the wheel speed simply follows
+/// the tilt and nothing builds up over time. kp 0.03 per degree gives a command of 0.3 at
+/// 10° and 0.45 at 15°, clearly above the 100 Hz start duty (16-22 %), so the wheels start
+/// at about 6-7° of tilt and keep turning down to about 3° (stop duty 8 %). Full power
+/// would need 33°, so the wheels never race. Without I and D a robot on the floor would
+/// run away (see "Control pipeline" in CLAUDE.md): this is not for balancing.
+const SIGN_CHECK_GAINS: Gains = Gains {
+    kp: 0.03,
+    ki: 0.0,
+    kd: 0.0,
+};
+
+/// The gains the controller runs with. The first balance attempt (bring-up step C3)
+/// switches this to `Config::PROTOTYPE.gains`, the gains tuned in simulation.
+const CONTROL_GAINS: Gains = SIGN_CHECK_GAINS;
+
 /// The direction check's command for both motors, by time since the start of the check.
 /// 0 while the safety cut-offs don't allow the motors to run.
 fn motor_check_cmd(elapsed_ms: u64, motors_allowed: bool) -> f32 {
@@ -272,10 +295,25 @@ impl Motor<'_> {
 
     /// Signed command, `-1.0..=1.0`: positive = forward, 0 = stop. Out-of-range values are
     /// clamped, NaN stops the motor (see `balance_core::split_command`).
+    ///
+    /// Called every 2 ms by the control loop, so it only touches the hardware when the
+    /// duty changes, and only goes through `run` (EN off while the IN pins switch) when
+    /// the direction changes. A duty change in the same direction is a single LEDC write.
     fn set(&mut self, cmd: f32) -> Result<(), channel::Error> {
         let (forward, duty_pct) = split_command(cmd);
+        // At most 100 (see `split_command`), so it fits an i8.
+        let magnitude = i8::try_from(duty_pct).unwrap_or(i8::MAX);
+        let signed = if forward { magnitude } else { -magnitude };
+        if signed == self.duty_pct {
+            return Ok(());
+        }
         if duty_pct == 0 {
             return self.stop();
+        }
+        if self.duty_pct != 0 && (self.duty_pct > 0) == forward {
+            self.en.set_duty(duty_pct)?;
+            self.duty_pct = signed;
+            return Ok(());
         }
         let direction = if forward {
             Direction::Forward
@@ -557,6 +595,7 @@ async fn main(spawner: Spawner) {
     // the range the chip was actually set to.
     let config = Config {
         gyro_lsb_per_dps: GYRO_RANGE.scale_factor(),
+        gains: CONTROL_GAINS,
         ..Config::PROTOTYPE
     };
 
@@ -700,6 +739,21 @@ fn apply_test_step(
         },
         TestStep::Stop | TestStep::Done => left.stop().and_then(|()| right.stop()),
     }
+}
+
+/// Drives both motors with the controller's command, if `CONTROL_ENABLED` and no motor
+/// test or direction check owns the motors; stopped while the safety cut-offs say no.
+fn apply_control(
+    cmd: f32,
+    motors_allowed: bool,
+    left: &mut Motor<'_>,
+    right: &mut Motor<'_>,
+) -> Result<(), channel::Error> {
+    if !CONTROL_ENABLED || MOTOR_TEST_ENABLED || MOTOR_CHECK_ENABLED {
+        return Ok(());
+    }
+    let cmd = if motors_allowed { cmd } else { 0.0 };
+    left.set(cmd).and(right.set(cmd))
 }
 
 /// Sets up PWM on the L298N enable pins and returns the `(left, right)` motors, stopped.
@@ -860,12 +914,17 @@ async fn control_loop(parts: ControlParts) {
         times.imu = times.imu.max(start.elapsed().as_micros());
         match imu_result {
             Ok(raw) => {
-                // The same code the simulator runs. `out.motor_cmd` is not applied yet:
-                // the gains are 0 and the motors stay off until a later step.
+                // The same code the simulator runs.
                 let out = controller.step(&raw, DT_S);
                 let (pitch, battery_v) = (out.filter_pitch_deg, latest_battery.0);
                 if let Some(status) = safety.update(pitch, battery_v, DT_S) {
                     log(&mut times, LogMsg::Safety(status, pitch, battery_v));
+                }
+                // Apply the command after the safety check of this very sample, so a
+                // tripped cut-off stops the motors in the same iteration.
+                let allowed = safety.status().motors_allowed();
+                if let Err(e) = apply_control(out.motor_cmd, allowed, &mut left, &mut right) {
+                    log(&mut times, LogMsg::MotorError(e));
                 }
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
