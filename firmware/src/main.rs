@@ -249,6 +249,9 @@ struct Motor<'d> {
     en: Channel<'d, LowSpeed>,
     in_a: Output<'d>,
     in_b: Output<'d>,
+    /// The duty last applied, in signed percent (positive = forward, 0 = stopped), for
+    /// the log.
+    duty_pct: i8,
 }
 
 impl Motor<'_> {
@@ -259,7 +262,12 @@ impl Motor<'_> {
         let forward = direction == Direction::Forward;
         self.in_a.set_level(Level::from(forward));
         self.in_b.set_level(Level::from(!forward));
-        self.en.set_duty(duty_pct)
+        self.duty_pct = 0;
+        self.en.set_duty(duty_pct)?;
+        // `duty_pct` is at most 100 (the LEDC driver rejects more), so it fits an i8.
+        let signed = i8::try_from(duty_pct).unwrap_or(i8::MAX);
+        self.duty_pct = if forward { signed } else { -signed };
+        Ok(())
     }
 
     /// Signed command, `-1.0..=1.0`: positive = forward, 0 = stop. Out-of-range values are
@@ -280,6 +288,7 @@ impl Motor<'_> {
     /// EN low: both outputs off, the motor coasts to a stop.
     fn stop(&mut self) -> Result<(), channel::Error> {
         self.en.set_duty(0)?;
+        self.duty_pct = 0;
         self.in_a.set_low();
         self.in_b.set_low();
         Ok(())
@@ -309,6 +318,8 @@ enum LogMsg {
         t_us: u64,
         raw: RawSample,
         out: ControlOutput,
+        /// Duty applied to the `[left, right]` motor, signed percent.
+        duty_pct: [i8; 2],
     },
     Battery {
         battery_v: f32,
@@ -343,11 +354,12 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
                     rates_dps: [rx, ry, rz],
                     gyro_pitch_deg: gyro_pitch,
                     filter_pitch_deg: filter_pitch,
-                    ..
+                    motor_cmd,
                 },
+            duty_pct: [duty_l, duty_r],
         } => writeln!(
             line,
-            "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1}",
+            "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1},{motor_cmd:>9.3},{duty_l:>6},{duty_r:>6}",
             a[0], a[1], a[2], g[0], g[1], g[2]
         ),
         LogMsg::Battery { battery_v, pin_mv } => {
@@ -583,7 +595,7 @@ async fn main(spawner: Spawner) {
         GYRO_RANGE.scale_factor()
     );
     println!(
-        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16}",
+        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6}",
         "t_us",
         "ax",
         "ay",
@@ -596,7 +608,10 @@ async fn main(spawner: Spawner) {
         "gy_dps",
         "gz_dps",
         "gyro_pitch_deg",
-        "filter_pitch_deg"
+        "filter_pitch_deg",
+        "motor_cmd",
+        "duty_l",
+        "duty_r"
     );
 
     // From here on, log lines go through the queue to the log task, which owns the async
@@ -731,11 +746,13 @@ async fn setup_motors(
         en: ena,
         in_a: left.in_a,
         in_b: left.in_b,
+        duty_pct: 0,
     };
     let right = Motor {
         en: enb,
         in_a: right.in_a,
         in_b: right.in_b,
+        duty_pct: 0,
     };
     (left, right)
 }
@@ -848,7 +865,15 @@ async fn control_loop(parts: ControlParts) {
                 }
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
-                    log(&mut times, LogMsg::Sample { t_us, raw, out });
+                    log(
+                        &mut times,
+                        LogMsg::Sample {
+                            t_us,
+                            raw,
+                            out,
+                            duty_pct: [left.duty_pct, right.duty_pct],
+                        },
+                    );
                 }
             }
             Err(e) => log(&mut times, LogMsg::ImuError(e)),

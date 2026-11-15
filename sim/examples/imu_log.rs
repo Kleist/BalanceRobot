@@ -43,7 +43,10 @@ fn main() {
     let held_samples: u64 = if fall { 500 } else { 30_000 };
     let mut t_us = 0;
     for _ in 0..held_samples {
-        println!("{}", pipeline.row(t_us, &imu.sample(&held, 0.0, 0.0)));
+        println!(
+            "{}",
+            pipeline.row(t_us, &imu.sample(&held, 0.0, 0.0), [0, 0])
+        );
         t_us += DT_US;
     }
     if !fall {
@@ -58,7 +61,7 @@ fn main() {
         let pitch_accel = body.pitch_accel(&state, 0.0);
         println!(
             "{}",
-            pipeline.row(t_us, &imu.sample(&state, pitch_accel, 0.0))
+            pipeline.row(t_us, &imu.sample(&state, pitch_accel, 0.0), [0, 0])
         );
         t_us += DT_US;
     }
