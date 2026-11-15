@@ -38,6 +38,10 @@
 //! starts turning on the way up and stops on the way down. The sequence runs twice, then
 //! both motors stay off. The IMU CSV is paused during the test, so the `# motor ...` lines
 //! are easy to follow. Keep the wheels off the ground.
+//!
+//! Direction check (off unless `MOTOR_CHECK_ENABLED`), after calibration: both motors get
+//! `Motor::set(+0.5)` for 2 s, stop for 2 s, `set(-0.5)` for 2 s, then stay off. `+` must
+//! turn both wheels the way that drives the robot forward.
 
 #![no_std]
 #![no_main]
@@ -47,6 +51,7 @@ use balance_core::{
     control::{Config, Controller, Output as ControlOutput},
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
+    split_command,
 };
 use core::fmt::Write as _;
 
@@ -143,6 +148,23 @@ const MOTOR_TEST_PASSES: u64 = 2;
 /// test pauses the CSV log; set to `true` to run it again.
 const MOTOR_TEST_ENABLED: bool = false;
 
+/// Direction check (off unless enabled; not together with `MOTOR_TEST_ENABLED`): after
+/// calibration both motors get `+MOTOR_CHECK_CMD` for `MOTOR_CHECK_STEP_MS`, stop for the
+/// same time, run at `-MOTOR_CHECK_CMD`, then stay off. With the wheels in the air, +
+/// must turn both wheels the way that drives the robot forward.
+const MOTOR_CHECK_ENABLED: bool = false;
+const MOTOR_CHECK_CMD: f32 = 0.5;
+const MOTOR_CHECK_STEP_MS: u64 = 2000;
+
+/// The direction check's command for both motors, by time since the start of the check.
+fn motor_check_cmd(elapsed_ms: u64) -> f32 {
+    match elapsed_ms / MOTOR_CHECK_STEP_MS {
+        0 => MOTOR_CHECK_CMD,
+        2 => -MOTOR_CHECK_CMD,
+        _ => 0.0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
     Left,
@@ -223,6 +245,21 @@ impl Motor<'_> {
         self.en.set_duty(duty_pct)
     }
 
+    /// Signed command, `-1.0..=1.0`: positive = forward, 0 = stop. Out-of-range values are
+    /// clamped, NaN stops the motor (see `balance_core::split_command`).
+    fn set(&mut self, cmd: f32) -> Result<(), channel::Error> {
+        let (forward, duty_pct) = split_command(cmd);
+        if duty_pct == 0 {
+            return self.stop();
+        }
+        let direction = if forward {
+            Direction::Forward
+        } else {
+            Direction::Backward
+        };
+        self.run(direction, duty_pct)
+    }
+
     /// EN low: both outputs off, the motor coasts to a stop.
     fn stop(&mut self) -> Result<(), channel::Error> {
         self.en.set_duty(0)?;
@@ -263,6 +300,7 @@ enum LogMsg {
     Times(LoopTimes),
     Motor(TestStep),
     MotorError(channel::Error),
+    MotorCmd(f32),
     ImuError(I2cError),
 }
 
@@ -313,6 +351,7 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
         LogMsg::Motor(TestStep::Done) => {
             writeln!(line, "# motor test done (or disabled), motors off")
         }
+        LogMsg::MotorCmd(cmd) => writeln!(line, "# motor cmd {cmd:+.2} (both)"),
         LogMsg::MotorError(e) => writeln!(line, "# motor command failed: {e:?}"),
         LogMsg::ImuError(e) => writeln!(line, "# IMU read failed: {e:?}"),
     }
@@ -678,6 +717,7 @@ async fn control_loop(parts: ControlParts) {
 
     let motor_test_start = Instant::now();
     let mut motor_step = None;
+    let mut last_check_cmd: Option<f32> = None;
     // The most recent battery average; `poll` updates it about every 64 ms.
     let mut latest_battery = battery.read_blocking();
     // Longest times since the last `# loop max` line: the whole iteration and its parts.
@@ -728,6 +768,17 @@ async fn control_loop(parts: ControlParts) {
             log(&mut times, LogMsg::Motor(step));
             if let Err(e) = apply_test_step(step, &mut left, &mut right) {
                 log(&mut times, LogMsg::MotorError(e));
+            }
+        }
+
+        if MOTOR_CHECK_ENABLED {
+            let cmd = motor_check_cmd(motor_test_start.elapsed().as_millis());
+            if last_check_cmd != Some(cmd) {
+                last_check_cmd = Some(cmd);
+                log(&mut times, LogMsg::MotorCmd(cmd));
+                if let Err(e) = left.set(cmd).and(right.set(cmd)) {
+                    log(&mut times, LogMsg::MotorError(e));
+                }
             }
         }
 
