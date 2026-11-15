@@ -103,9 +103,10 @@ impl ImuParams {
     ///
     /// - position: 12.7 cm above the axle and 1.5 cm ahead of it (the board
     ///   sits on the front of the battery pack, 1.5 cm in front of the
-    ///   centre of mass). That is just above the centre of percussion
-    ///   (I/(m·d) ≈ 12.2 cm), so at the start of a fall the accel pitch
-    ///   barely moves (see the tests).
+    ///   centre of mass). That is below the centre of percussion for a fall
+    ///   with the axle held still ((I + m·d·r)/(m·d) ≈ 15.4 cm), close
+    ///   enough that at the start of such a fall the accel pitch shows only
+    ///   about a fifth of the real tilt (see the tests).
     ///
     /// The rest is from a 60 s log of the robot lying still (`log_stats`
     /// example):
@@ -317,27 +318,23 @@ mod tests {
         // The axle point doesn't accelerate, so only gravity is seen.
         let body = Body::prototype();
         let state = State::tilted_deg(10.0);
-        let falling = specific_force(
-            &state,
-            body.pitch_accel(state.pitch_rad, 0.0),
-            0.0,
-            0.0,
-            0.0,
-        );
+        let falling = specific_force(&state, body.pitch_accel(&state, 0.0), 0.0, 0.0, 0.0);
         let held = specific_force(&state, 0.0, 0.0, 0.0, 0.0);
         assert!((falling.0 - held.0).abs() < 1e-12);
     }
 
     #[test]
     fn at_the_centre_of_percussion_a_fall_reads_no_tilt() {
-        // At h = I/(m·d) the tangential acceleration h·θ'' exactly cancels
-        // gravity's −g·sin θ: an IMU there reads forward = 0 at the start of
-        // a fall, so its accel pitch says "upright" while the robot tips over.
+        // With the axle held still, θ'' = m·d·g·sin θ / (I + m·d·r·cos θ) at
+        // the start of a fall. At h = (I + m·d·r·cos θ)/(m·d) the tangential
+        // acceleration h·θ'' exactly cancels gravity's −g·sin θ: an IMU there
+        // reads forward = 0, so its accel pitch says "upright" while the
+        // robot tips over.
         let body = Body::prototype();
-        let h = body.inertia_kg_m2 / (body.mass_kg * body.com_height_m);
+        let md = body.mass_kg * body.com_height_m;
         let state = State::tilted_deg(10.0);
-        let (forward, _) =
-            specific_force(&state, body.pitch_accel(state.pitch_rad, 0.0), 0.0, h, 0.0);
+        let h = (body.inertia_kg_m2 + md * body.wheel_radius_m * state.pitch_rad.cos()) / md;
+        let (forward, _) = specific_force(&state, body.pitch_accel(&state, 0.0), 0.0, h, 0.0);
         assert!(forward.abs() < 1e-9, "{forward}");
     }
 
@@ -360,22 +357,24 @@ mod tests {
     }
 
     #[test]
-    fn prototype_accel_pitch_barely_moves_as_a_fall_starts() {
-        // Released at 5°: the chip sits just above the centre of percussion,
-        // so its accel pitch reads within a degree of 0 instead of 5°.
+    fn prototype_accel_pitch_shows_a_fifth_of_the_tilt_as_a_fall_starts() {
+        // Released at 5° with the axle held still: the chip sits at 12.7 cm,
+        // below the centre of percussion (15.4 cm), so gravity's tilt
+        // component is only partly cancelled: 1 − 12.7/15.4 ≈ 18 % of it is
+        // left, and the accel pitch reads ~0.9° instead of 5°.
         let body = Body::prototype();
         let p = ImuParams::prototype();
         let state = State::tilted_deg(5.0);
         let (forward, up) = specific_force(
             &state,
-            body.pitch_accel(state.pitch_rad, 0.0),
+            body.pitch_accel(&state, 0.0),
             0.0,
             p.height_above_axle_m,
             p.ahead_of_axle_m,
         );
         #[expect(clippy::cast_possible_truncation, reason = "a few m/s², fits f32")]
         let pitch = accel_pitch_deg(forward as f32, up as f32);
-        assert!(pitch.abs() < 1.0, "{pitch}");
+        assert!((pitch - 0.9).abs() < 0.2, "{pitch}");
     }
 
     #[test]

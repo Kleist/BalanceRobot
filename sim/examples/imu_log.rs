@@ -3,7 +3,8 @@
 //! - `cargo run -p sim --example imu_log`: held upright and still for 60 s,
 //!   to compare with a still log of the real robot (`log_stats` example).
 //! - `cargo run -p sim --example imu_log -- fall`: held at 2° for 1 s, then
-//!   released (no controller) until it lies at 90°.
+//!   released with the axle held still (motors locking the wheels to the
+//!   floor, no controller) until it lies at 90°.
 //!
 //! Like the firmware, it first calibrates the gyro from 1000 still samples.
 //! Unlike the firmware, it logs every sample (500 lines/s), not every 50th.
@@ -54,7 +55,7 @@ fn main() {
         for _ in 0..SUBSTEPS {
             state = state.step(&body, 0.0, PHYSICS_DT_S);
         }
-        let pitch_accel = body.pitch_accel(state.pitch_rad, 0.0);
+        let pitch_accel = body.pitch_accel(&state, 0.0);
         println!(
             "{}",
             pipeline.row(t_us, &imu.sample(&state, pitch_accel, 0.0))
