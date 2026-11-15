@@ -39,6 +39,13 @@
 //! both motors stay off. The IMU CSV is paused during the test, so the `# motor ...` lines
 //! are easy to follow. Keep the wheels off the ground.
 //!
+//! Safety cut-offs (`balance_core::safety`), checked after every IMU read: the motors may
+//! only run while the robot is upright (off past ±45°, back on once held within ±5°; off
+//! at power-up until held upright once) and the battery isn't empty (warning below 6.6 V,
+//! off below 6.4 V for good, each after 1 s below the threshold). Every change is logged
+//! as a `# safety: ...` line. The motor test and direction check below obey them, so hold
+//! the robot upright (wheels in the air) while they run.
+//!
 //! Direction check (off unless `MOTOR_CHECK_ENABLED`), after calibration: both motors get
 //! `Motor::set(+0.5)` for 2 s, stop for 2 s, `set(-0.5)` for 2 s, then stay off. `+` must
 //! turn both wheels the way that drives the robot forward.
@@ -51,6 +58,7 @@ use balance_core::{
     control::{Config, Controller, Output as ControlOutput},
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
+    safety::{Limits, Safety, Status},
     split_command,
 };
 use core::fmt::Write as _;
@@ -162,7 +170,11 @@ const MOTOR_CHECK_CMD: f32 = 0.5;
 const MOTOR_CHECK_STEP_MS: u64 = 2000;
 
 /// The direction check's command for both motors, by time since the start of the check.
-fn motor_check_cmd(elapsed_ms: u64) -> f32 {
+/// 0 while the safety cut-offs don't allow the motors to run.
+fn motor_check_cmd(elapsed_ms: u64, motors_allowed: bool) -> f32 {
+    if !motors_allowed {
+        return 0.0;
+    }
     match elapsed_ms / MOTOR_CHECK_STEP_MS {
         0 => MOTOR_CHECK_CMD,
         2 => -MOTOR_CHECK_CMD,
@@ -306,6 +318,8 @@ enum LogMsg {
     Motor(TestStep),
     MotorError(channel::Error),
     MotorCmd(f32),
+    /// The safety cut-offs changed: new status, filter pitch (deg), battery (V).
+    Safety(Status, f32, f32),
     /// PWM frequency in Hz, logged once at the start.
     PwmFrequency(u32),
     ImuError(I2cError),
@@ -359,6 +373,13 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
             writeln!(line, "# motor test done (or disabled), motors off")
         }
         LogMsg::PwmFrequency(hz) => writeln!(line, "# motor pwm frequency {hz} Hz"),
+        LogMsg::Safety(status, pitch_deg, battery_v) => writeln!(
+            line,
+            "# safety: motors {} (upright: {}, battery: {:?}; pitch {pitch_deg:+.1} deg, battery {battery_v:.2} V)",
+            if status.motors_allowed() { "on" } else { "off" },
+            status.upright,
+            status.battery,
+        ),
         LogMsg::MotorCmd(cmd) => writeln!(line, "# motor cmd {cmd:+.2} (both)"),
         LogMsg::MotorError(e) => writeln!(line, "# motor command failed: {e:?}"),
         LogMsg::ImuError(e) => writeln!(line, "# IMU read failed: {e:?}"),
@@ -643,6 +664,14 @@ struct MotorPins {
 static CONTROL_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
 static PWM_TIMER: StaticCell<timer::Timer<'static, LowSpeed>> = StaticCell::new();
 
+/// A tripped safety cut-off stops the test motor; the test sequence itself keeps its time.
+fn gate_test_step(step: TestStep, motors_allowed: bool) -> TestStep {
+    match step {
+        TestStep::Run(..) if !motors_allowed => TestStep::Stop,
+        other => other,
+    }
+}
+
 /// Drives the motors for one motor test step.
 fn apply_test_step(
     step: TestStep,
@@ -726,6 +755,10 @@ async fn control_loop(parts: ControlParts) {
     let motor_test_start = Instant::now();
     let mut motor_step = None;
     let mut last_check_cmd: Option<f32> = None;
+    // Safety cut-offs (fallen, battery). Motors start off until the robot is held upright.
+    // Updated after each IMU read, so the motor code below uses the previous iteration's
+    // status: 2 ms late, which doesn't matter for stopping.
+    let mut safety = Safety::new(Limits::PROTOTYPE);
     // The most recent battery average; `poll` updates it about every 64 ms.
     let mut latest_battery = battery.read_blocking();
     // Longest times since the last `# loop max` line: the whole iteration and its parts.
@@ -776,6 +809,7 @@ async fn control_loop(parts: ControlParts) {
         } else {
             TestStep::Done
         };
+        let step = gate_test_step(step, safety.status().motors_allowed());
         if motor_step != Some(step) {
             motor_step = Some(step);
             log(&mut times, LogMsg::Motor(step));
@@ -785,7 +819,8 @@ async fn control_loop(parts: ControlParts) {
         }
 
         if MOTOR_CHECK_ENABLED {
-            let cmd = motor_check_cmd(motor_test_start.elapsed().as_millis());
+            let elapsed_ms = motor_test_start.elapsed().as_millis();
+            let cmd = motor_check_cmd(elapsed_ms, safety.status().motors_allowed());
             if last_check_cmd != Some(cmd) {
                 last_check_cmd = Some(cmd);
                 log(&mut times, LogMsg::MotorCmd(cmd));
@@ -807,6 +842,10 @@ async fn control_loop(parts: ControlParts) {
                 // The same code the simulator runs. `out.motor_cmd` is not applied yet:
                 // the gains are 0 and the motors stay off until a later step.
                 let out = controller.step(&raw, DT_S);
+                let (pitch, battery_v) = (out.filter_pitch_deg, latest_battery.0);
+                if let Some(status) = safety.update(pitch, battery_v, DT_S) {
+                    log(&mut times, LogMsg::Safety(status, pitch, battery_v));
+                }
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
                     log(&mut times, LogMsg::Sample { t_us, raw, out });
