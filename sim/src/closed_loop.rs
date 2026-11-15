@@ -75,6 +75,10 @@ pub struct Sim {
     state: State,
     /// Command the motors are currently getting.
     cmd: f64,
+    /// Duties on their way to the motor, oldest first (dead time, see
+    /// [`Sim::with_dead_time_ticks`]).
+    in_flight: std::collections::VecDeque<f32>,
+    dead_time_ticks: usize,
     ticks: u32,
 }
 
@@ -118,6 +122,8 @@ impl Sim {
             drive: None,
             state: start,
             cmd: 0.0,
+            in_flight: std::collections::VecDeque::new(),
+            dead_time_ticks: 0,
             ticks: 0,
         })
     }
@@ -161,6 +167,18 @@ impl Sim {
         }
     }
 
+    /// The same robot with `ticks` controller periods (2 ms each) of dead
+    /// time between the controller and the motor: a pure delay before the
+    /// motor reacts at all (PWM period, current build-up, gear backlash),
+    /// unlike the motor's lag, which starts reacting at once.
+    #[must_use]
+    pub fn with_dead_time_ticks(self, ticks: usize) -> Self {
+        Self {
+            dead_time_ticks: ticks,
+            ..self
+        }
+    }
+
     /// Advances one controller period (2 ms).
     pub fn tick(&mut self) -> Tick {
         let axle_accel = self.motor.axle_accel(self.cmd, self.state.axle_vel_m_s);
@@ -186,9 +204,17 @@ impl Sim {
             axle_pos_m: self.state.axle_pos_m,
         };
 
+        self.in_flight.push_back(duty);
+        let arriving = if self.in_flight.len() > self.dead_time_ticks {
+            self.in_flight.pop_front()
+        } else {
+            None
+        };
         for step in 0..STEPS_PER_TICK {
-            if step == LATENCY_STEPS {
-                self.cmd = f64::from(duty);
+            if step == LATENCY_STEPS
+                && let Some(d) = arriving
+            {
+                self.cmd = f64::from(d);
             }
             let a = self.motor.axle_accel(self.cmd, self.state.axle_vel_m_s);
             self.state = self.state.step(&self.body, a, PHYSICS_DT_S);
@@ -264,6 +290,14 @@ mod tests {
 
     use super::Sim;
     use crate::motor::Motor;
+
+    /// The gains the deadband findings (bring-up steps B1/B2) were measured
+    /// with, before the first balance attempt halved kd.
+    const B_STEP_GAINS: Gains = Gains {
+        kp: 0.12,
+        ki: 2.0,
+        kd: 0.008,
+    };
 
     /// With the ideal (linear) motor.
     fn run(kp: f32, ki: f32, kd: f32, seconds: f64) -> super::Run {
@@ -347,8 +381,9 @@ mod tests {
         // 0.5°, only seed 5 does it (8 stops in 1-7 s, pitch up to ±0.5°); the
         // others settle into the steady roll. Which seed depends on how the
         // noise lands, so it changed when the IMU axes were corrected (front
-        // = closed side; seed 4 did it before).
-        let gains = Config::PROTOTYPE.gains;
+        // = closed side; seed 4 did it before). Measured with the B-step gains
+        // (kd 0.008).
+        let gains = B_STEP_GAINS;
         let mut sim = Sim::new(
             crate::pendulum::Body::prototype(),
             Motor::prototype(),
@@ -379,11 +414,15 @@ mod tests {
     // (`Drive::PROTOTYPE`) between the controller and the deadband motor.
 
     fn with_drive(start_deg: f64, seed: u64, battery_v: f64) -> super::Run {
+        with_drive_gains(Config::PROTOTYPE.gains, start_deg, seed, battery_v)
+    }
+
+    fn with_drive_gains(gains: Gains, start_deg: f64, seed: u64, battery_v: f64) -> super::Run {
         Sim::new(
             crate::pendulum::Body::prototype(),
             Motor::prototype().at_battery(battery_v),
             crate::imu::ImuParams::prototype(),
-            Config::PROTOTYPE.gains,
+            gains,
             start_deg,
             seed,
         )
@@ -410,14 +449,14 @@ mod tests {
     #[test]
     fn compensation_reduces_the_drift_to_that_of_the_ideal_motor() {
         // Seed 1 from 2°: ideal motor ~0.09 m in 10 s, deadband ~0.19 m,
-        // compensated ~0.10 m.
-        let gains = Config::PROTOTYPE.gains;
+        // compensated ~0.10 m. Measured with the B-step gains (kd 0.008).
+        let gains = B_STEP_GAINS;
         let pos = |r: &super::Run| r.last().unwrap().axle_pos_m.abs();
         let ideal = pos(&Sim::with_motor(Motor::ideal(), gains, 2.0)
             .unwrap()
             .run(10.0));
         let raw = pos(&Sim::prototype(gains, 2.0).unwrap().run(10.0));
-        let comp = pos(&with_drive(2.0, 1, 7.4));
+        let comp = pos(&with_drive_gains(gains, 2.0, 1, 7.4));
         assert!(comp < 0.7 * raw, "{comp} vs {raw}");
         assert!((comp - ideal).abs() < 0.03, "{comp} vs {ideal}");
     }
@@ -443,5 +482,58 @@ mod tests {
         assert!((10..=25).contains(&stops), "{stops}");
         let swing = r.max_abs_pitch_deg(5.0);
         assert!((0.3..1.5).contains(&swing), "{swing}");
+    }
+
+    // Dead time and the first balance attempt (bring-up step C4).
+
+    fn fast_motor(gains: Gains, dead_ms: usize) -> super::Run {
+        // A motor that responds faster than the 50 ms estimate, plus dead
+        // time: the model that reproduces the robot's fast shaking.
+        let motor = Motor {
+            time_constant_s: 0.030,
+            ..Motor::prototype()
+        }
+        .at_battery(7.75);
+        Sim::new(
+            crate::pendulum::Body::prototype(),
+            motor,
+            crate::imu::ImuParams::prototype(),
+            gains,
+            4.6,
+            1,
+        )
+        .unwrap()
+        .with_drive(balance_core::drive::Drive::PROTOTYPE)
+        .with_dead_time_ticks(dead_ms / 2)
+        .run(10.0)
+    }
+
+    #[test]
+    fn dead_time_delays_the_first_command() {
+        // 10 ticks (20 ms) of dead time: the wheels don't move before.
+        let mut sim = Sim::prototype(Config::PROTOTYPE.gains, 5.0)
+            .unwrap()
+            .with_dead_time_ticks(10);
+        for _ in 0..10 {
+            assert!(sim.tick().axle_vel_m_s.abs() < 1e-12);
+        }
+        let mut moved = false;
+        for _ in 0..20 {
+            moved |= sim.tick().axle_vel_m_s.abs() > 1e-6;
+        }
+        assert!(moved);
+    }
+
+    #[test]
+    fn old_kd_shakes_with_a_faster_motor_the_new_one_does_not() {
+        // The first balance attempt stood ~10 s but shook at ~8 Hz with the
+        // command saturated ~30 % of the time; kd 0.008 alone gave more than
+        // full command at the ±150 °/s it swung with. With a 30 ms motor lag
+        // and 20 ms dead time the simulation shakes and falls with kd 0.008;
+        // kd 0.004 (now in `Config::PROTOTYPE`) stays up and calm.
+        assert!(fast_motor(B_STEP_GAINS, 20).fell_at_s.is_some());
+        let new = fast_motor(Config::PROTOTYPE.gains, 20);
+        assert_eq!(new.fell_at_s, None);
+        assert!(new.max_abs_pitch_deg(5.0) < 3.0);
     }
 }
