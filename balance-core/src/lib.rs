@@ -8,6 +8,7 @@
 pub mod attitude;
 pub mod battery;
 pub mod control;
+pub mod drive;
 pub mod gyro;
 pub mod imu;
 pub mod pid;
