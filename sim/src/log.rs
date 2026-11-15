@@ -1,17 +1,13 @@
 //! The firmware's IMU log, produced from simulated samples.
 //!
-//! [`Pipeline`] does what the firmware's control loop does with each sample,
-//! using the same `balance-core` functions: gyro bias calibration at startup,
-//! accel pitch, bias-corrected rates, gyro-only pitch and the complementary
-//! filter. [`Pipeline::row`] formats the result exactly like a firmware CSV
-//! line, so the same tools can read a real and a simulated log.
-//!
-//! The constants and the axis mapping are copies of the firmware's
-//! (`firmware/src/main.rs`); keep them in sync until the control-step PR
-//! moves them into `balance-core`.
+//! [`Pipeline`] does what the firmware does with each sample: gyro bias
+//! calibration at startup, then [`Controller::step`] from `balance-core`,
+//! the very code the firmware runs. [`Pipeline::row`] formats the result
+//! exactly like a firmware CSV line, so the same tools can read a real and a
+//! simulated log.
 
 use balance_core::{
-    attitude::{ComplementaryFilter, accel_pitch_deg},
+    control::{Config, Controller},
     gyro::{BiasCalibrator, CalibrationError, GyroBias},
     imu::RawSample,
 };
@@ -20,31 +16,10 @@ use balance_core::{
 pub const DT_S: f32 = 0.002;
 /// Loop period in µs.
 pub const DT_US: u64 = 2000;
-/// The firmware's `FILTER_TAU_S`.
-const FILTER_TAU_S: f32 = 0.5;
-/// The firmware's `BALANCE_PITCH_DEG`: accel pitch at the balance point.
-const BALANCE_PITCH_DEG: f32 = -3.8;
-/// The firmware's `CALIBRATION_SAMPLES`.
-pub const CALIBRATION_SAMPLES: u32 = 1000;
-/// The firmware's `CALIBRATION_MAX_SPREAD_DPS`.
-const CALIBRATION_MAX_SPREAD_DPS: f32 = 2.0;
-/// Gyro LSB per °/s at ±500 °/s (`GyroRange::Deg500.scale_factor()`).
-const GYRO_SCALE: f32 = 65.5;
-
-/// The firmware's `gyro_dps`.
-fn gyro_dps(g: [i16; 3]) -> [f32; 3] {
-    g.map(|v| f32::from(v) / GYRO_SCALE)
-}
-
-/// The firmware's `robot_axes`: `(forward, up)` = IMU `(z, x)`.
-fn robot_axes(a: [i16; 3]) -> (f32, f32) {
-    (f32::from(a[2]), f32::from(a[0]))
-}
-
-/// The firmware's `robot_pitch_rate`: minus gyro Y.
-const fn robot_pitch_rate(rates_dps: [f32; 3]) -> f32 {
-    -rates_dps[1]
-}
+/// The controller settings the firmware uses.
+const CONFIG: Config = Config::PROTOTYPE;
+/// Still samples needed for the gyro calibration.
+pub const CALIBRATION_SAMPLES: u32 = CONFIG.calibration_samples;
 
 /// The `#` lines and the column header the firmware prints before the CSV.
 #[must_use]
@@ -74,8 +49,7 @@ pub fn header(bias: GyroBias) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct Pipeline {
     bias: GyroBias,
-    gyro_pitch: Option<f32>,
-    filter: ComplementaryFilter,
+    controller: Controller,
 }
 
 impl Pipeline {
@@ -91,13 +65,15 @@ impl Pipeline {
     ) -> Result<Self, CalibrationError> {
         let mut calibrator = BiasCalibrator::new();
         for sample in samples {
-            calibrator.add(gyro_dps(sample.gyro));
+            calibrator.add(CONFIG.gyro_dps(sample.gyro));
         }
-        let bias = calibrator.finish(CALIBRATION_SAMPLES, CALIBRATION_MAX_SPREAD_DPS)?;
+        let bias = calibrator.finish(
+            CONFIG.calibration_samples,
+            CONFIG.calibration_max_spread_dps,
+        )?;
         Ok(Self {
             bias,
-            gyro_pitch: None,
-            filter: ComplementaryFilter::new(FILTER_TAU_S),
+            controller: Controller::new(CONFIG, bias),
         })
     }
 
@@ -110,19 +86,13 @@ impl Pipeline {
     /// Processes one sample taken at `t_us` and returns its CSV line (without
     /// a newline), formatted like the firmware's.
     pub fn row(&mut self, t_us: u64, raw: &RawSample) -> String {
-        let (forward, up) = robot_axes(raw.accel);
-        let pitch = accel_pitch_deg(forward, up) - BALANCE_PITCH_DEG;
-        let rates = self.bias.apply(gyro_dps(raw.gyro));
-        let gyro_pitch = self.gyro_pitch.get_or_insert(pitch);
-        *gyro_pitch += robot_pitch_rate(rates) * DT_S;
-        let filter_pitch = self.filter.update(pitch, robot_pitch_rate(rates), DT_S);
-
+        let out = self.controller.step(raw, DT_S);
         let [ax, ay, az] = raw.accel;
         let [gx, gy, gz] = raw.gyro;
-        let [rx, ry, rz] = rates;
+        let [rx, ry, rz] = out.rates_dps;
         format!(
-            "{t_us:>10},{ax:>6},{ay:>6},{az:>6},{gx:>6},{gy:>6},{gz:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1}",
-            gyro_pitch = *gyro_pitch
+            "{t_us:>10},{ax:>6},{ay:>6},{az:>6},{gx:>6},{gy:>6},{gz:>6},{:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{:>16.1}",
+            out.accel_pitch_deg, out.gyro_pitch_deg, out.filter_pitch_deg
         )
     }
 }

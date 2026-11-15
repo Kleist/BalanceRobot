@@ -19,6 +19,9 @@
 //! `# battery ...` lines, also during the motor test, so the sag under load shows up.
 //!
 //! At startup the gyro bias is calibrated while the robot stands still.
+//! Each sample then goes through `balance_core::control::Controller` (the same code the
+//! simulator runs), which computes the pitch estimates and a motor command. The command
+//! is not applied yet: the motors stay off.
 //!
 //! Runs on two Embassy executors sharing the one CPU core:
 //! - the normal (thread-mode) executor runs `main` (setup and calibration), then the `blink`
@@ -40,8 +43,8 @@
 #![no_main]
 
 use balance_core::{
-    attitude::{ComplementaryFilter, accel_pitch_deg},
     battery::Divider,
+    control::{Config, Controller, Output as ControlOutput},
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
 };
@@ -96,16 +99,6 @@ const DT_S: f32 = 0.002;
 const LOG_EVERY_N_SAMPLES: u32 = 50;
 /// Log the loop's busy time once per this many samples: 500 = once a second.
 const LOOP_STATS_EVERY_N_SAMPLES: u32 = 500;
-/// The accelerometer pitch at the robot's balance point (centre of mass above the axle),
-/// held by hand: −3.8°. Subtracted from the accelerometer pitch, so 0° = balanced and all
-/// pitch columns in the log are relative to that. Refine once the robot balances: if it
-/// keeps rolling forward while holding 0°, it is really leaning forward there, so the
-/// true balance point is further back: lower this value (and vice versa).
-const BALANCE_PITCH_DEG: f32 = -3.8;
-/// Complementary filter time constant: changes faster than this come from the gyro,
-/// slower ones from the accelerometer. 0.5 s is a common starting point; tune later.
-const FILTER_TAU_S: f32 = 0.5;
-
 /// Battery sense divider: battery + → 100 kΩ → GPIO4 → 33 kΩ → GND.
 const BATTERY_DIVIDER: Divider = Divider {
     top_ohm: 100_000.0,
@@ -116,14 +109,6 @@ const BATTERY_DIVIDER: Divider = Divider {
 const BATTERY_AVERAGE: u32 = 16;
 /// Log the battery voltage once per this many samples: 250 = every 0.5 s.
 const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 250;
-
-/// Gyro calibration: 1000 samples at 500 Hz = 2 s of holding still.
-const CALIBRATION_SAMPLES: u32 = 1000;
-/// Largest allowed max − min per axis during calibration, in °/s. The gyro's noise at
-/// rest is about 0.5 °/s peak to peak; moving the robot gives tens of °/s, which rejects
-/// the calibration. (With per-register reads this had to be 5 °/s: an axis crossing zero
-/// could tear into a single 3.9 °/s spike. Burst reads can't tear.)
-const CALIBRATION_MAX_SPREAD_DPS: f32 = 2.0;
 
 /// PWM frequency for the L298N enable pins. 1 kHz is a compromise: the L298N switches
 /// slowly (a few µs per edge), so at low frequencies those edges are a small part of
@@ -247,40 +232,6 @@ impl Motor<'_> {
     }
 }
 
-/// Raw gyro LSB to °/s for the configured range.
-fn gyro_dps(g: [i16; 3]) -> [f32; 3] {
-    let scale = GYRO_RANGE.scale_factor();
-    g.map(|v| f32::from(v) / scale)
-}
-
-/// Map the IMU's X/Y/Z to the robot's `(forward, up)`, including signs.
-///
-/// The board stands upright on the chassis: **+X points up, +Z forward, +Y to the
-/// right** (so the axle is Y). Measured with the robot held still (1 g = 8192 LSB):
-///
-/// | Position | ax | ay | az |
-/// |---|---|---|---|
-/// | Upright (balance point) | +8169 | −147 | +540 |
-/// | Tilted forward ~40° | +6011 | −196 | −5469 |
-/// | Tilted backward ~40° | +5950 | −40 | +5711 |
-///
-/// Upright, X reads +1 g, so +X is up. Tipping forward points +Z towards the ground, so
-/// `az` goes negative, which is what `accel_pitch_deg` expects of the forward axis.
-fn robot_axes(a: [i16; 3]) -> (f32, f32) {
-    let forward = f32::from(a[2]);
-    let up = f32::from(a[0]);
-    (forward, up)
-}
-
-/// The robot's pitch rate in °/s (positive = tipping forward) from the gyro's `[x, y, z]`.
-///
-/// Pitching rotates the robot about its wheel axle, Y (see `robot_axes`). Tipping forward
-/// turns +Z (forward) towards −X (down). By the right-hand rule a positive rotation about
-/// +Y turns +Z towards +X, the other way, so tipping forward is a *negative* Y rate.
-fn robot_pitch_rate(rates_dps: [f32; 3]) -> f32 {
-    -rates_dps[1]
-}
-
 /// Longest time in µs, per part of the sample loop, since the last `# loop max` line.
 #[derive(Debug, Clone, Copy, Default)]
 struct LoopTimes {
@@ -303,10 +254,7 @@ enum LogMsg {
     Sample {
         t_us: u64,
         raw: RawSample,
-        pitch: f32,
-        rates: [f32; 3],
-        gyro_pitch: f32,
-        filter_pitch: f32,
+        out: ControlOutput,
     },
     Battery {
         battery_v: f32,
@@ -330,10 +278,14 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
         LogMsg::Sample {
             t_us,
             raw: RawSample { accel: a, gyro: g },
-            pitch,
-            rates: [rx, ry, rz],
-            gyro_pitch,
-            filter_pitch,
+            out:
+                ControlOutput {
+                    accel_pitch_deg: pitch,
+                    rates_dps: [rx, ry, rz],
+                    gyro_pitch_deg: gyro_pitch,
+                    filter_pitch_deg: filter_pitch,
+                    ..
+                },
         } => writeln!(
             line,
             "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1}",
@@ -521,6 +473,13 @@ async fn main(spawner: Spawner) {
         "# IMU read time: per-register {per_register_us} us (ok: {per_register_ok}), burst {burst_us} us (ok: {burst_ok})"
     );
 
+    // The controller settings shared with the simulator, with the gyro scale taken from
+    // the range the chip was actually set to.
+    let config = Config {
+        gyro_lsb_per_dps: GYRO_RANGE.scale_factor(),
+        ..Config::PROTOTYPE
+    };
+
     // Gyro bias: average ~2 s of samples while the robot is still, and retry until the
     // robot was still enough.
     let bias: GyroBias = loop {
@@ -529,14 +488,17 @@ async fn main(spawner: Spawner) {
         // A Ticker fires on a fixed schedule (every SAMPLE_PERIOD since it was created),
         // so the rate stays exact even though each iteration takes a little time.
         let mut ticker = Ticker::every(SAMPLE_PERIOD);
-        for _ in 0..CALIBRATION_SAMPLES {
+        for _ in 0..config.calibration_samples {
             match read_imu(&mut i2c) {
-                Ok(sample) => calibrator.add(gyro_dps(sample.gyro)),
+                Ok(sample) => calibrator.add(config.gyro_dps(sample.gyro)),
                 Err(e) => println!("# gyro read failed: {e:?}"),
             }
             ticker.next().await;
         }
-        match calibrator.finish(CALIBRATION_SAMPLES, CALIBRATION_MAX_SPREAD_DPS) {
+        match calibrator.finish(
+            config.calibration_samples,
+            config.calibration_max_spread_dps,
+        ) {
             Ok(bias) => break bias,
             Err(e) => println!("# gyro calibration rejected ({e:?}), retrying"),
         }
@@ -590,7 +552,7 @@ async fn main(spawner: Spawner) {
     let parts = ControlParts {
         i2c,
         battery,
-        bias,
+        controller: Controller::new(config, bias),
         ledc: peripherals.LEDC,
         left: MotorPins {
             en: peripherals.GPIO0.into(),
@@ -617,7 +579,8 @@ async fn main(spawner: Spawner) {
 struct ControlParts {
     i2c: I2c<'static, Blocking>,
     battery: Battery,
-    bias: GyroBias,
+    /// Plain numbers only (settings, bias, filter and PID state), so it is `Send`.
+    controller: Controller,
     ledc: LEDC<'static>,
     left: MotorPins,
     right: MotorPins,
@@ -709,16 +672,12 @@ async fn control_loop(parts: ControlParts) {
     let ControlParts {
         mut i2c,
         mut battery,
-        bias,
+        mut controller,
         ..
     } = parts;
 
     let motor_test_start = Instant::now();
     let mut motor_step = None;
-    // Gyro-only pitch: starts at the accelerometer pitch of the first sample, then only
-    // ever adds up rate × dt. Any leftover bias adds up too, so this drifts.
-    let mut gyro_pitch: Option<f32> = None;
-    let mut filter = ComplementaryFilter::new(FILTER_TAU_S);
     // The most recent battery average; `poll` updates it about every 64 ms.
     let mut latest_battery = battery.read_blocking();
     // Longest times since the last `# loop max` line: the whole iteration and its parts.
@@ -781,24 +740,12 @@ async fn control_loop(parts: ControlParts) {
         times.imu = times.imu.max(start.elapsed().as_micros());
         match imu_result {
             Ok(raw) => {
-                let (forward, up) = robot_axes(raw.accel);
-                let pitch = accel_pitch_deg(forward, up) - BALANCE_PITCH_DEG;
-                let rates = bias.apply(gyro_dps(raw.gyro));
-                let gyro_pitch = gyro_pitch.get_or_insert(pitch);
-                *gyro_pitch += robot_pitch_rate(rates) * DT_S;
-                let filter_pitch = filter.update(pitch, robot_pitch_rate(rates), DT_S);
-
+                // The same code the simulator runs. `out.motor_cmd` is not applied yet:
+                // the gains are 0 and the motors stay off until a later step.
+                let out = controller.step(&raw, DT_S);
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
-                    let msg = LogMsg::Sample {
-                        t_us,
-                        raw,
-                        pitch,
-                        rates,
-                        gyro_pitch: *gyro_pitch,
-                        filter_pitch,
-                    };
-                    log(&mut times, msg);
+                    log(&mut times, LogMsg::Sample { t_us, raw, out });
                 }
             }
             Err(e) => log(&mut times, LogMsg::ImuError(e)),
