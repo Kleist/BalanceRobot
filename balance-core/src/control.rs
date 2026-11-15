@@ -71,9 +71,14 @@ impl Config {
     /// - calibration 1000 samples (2 s at 500 Hz), spread ≤ 2 °/s: the gyro's
     ///   noise at rest is about 0.5 °/s peak to peak; moving the robot gives
     ///   tens of °/s.
-    /// - gains kp 0.12, ki 2.0, kd 0.008: tuned in simulation (`sim` crate,
-    ///   `tune` example) with an *ideal* motor, i.e. no deadband or backlash.
-    ///   Not tried on the robot yet. The I term is essential: with motors
+    /// - gains kp 0.12, ki 2.0, kd 0.004: tuned in simulation (`sim` crate,
+    ///   `tune` example) with an *ideal* motor, with kd 0.008. The first
+    ///   balance attempt stood but shook at ~8 Hz with the command saturating
+    ///   (kd 0.008 × the ±150 °/s it swung with is more than full command);
+    ///   the simulation reproduces that with a faster motor (30 ms lag) plus
+    ///   ~20 ms dead time, and kd halved to 0.004 stays calm there and on the
+    ///   nominal model (`compare` example, `closed_loop` tests). The I term is
+    ///   essential: with motors
     ///   that behave like speed sources (DC motors do), P or PD alone can't
     ///   balance, because ∫pitch is what tells the controller about the
     ///   wheel speed.
@@ -86,7 +91,7 @@ impl Config {
         gains: Gains {
             kp: 0.12,
             ki: 2.0,
-            kd: 0.008,
+            kd: 0.004,
         },
     };
 
