@@ -115,12 +115,16 @@ const BATTERY_AVERAGE: u32 = 16;
 /// Log the battery voltage once per this many samples: 250 = every 0.5 s.
 const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 250;
 
-/// PWM frequency for the L298N enable pins. 1 kHz is a compromise: the L298N switches
-/// slowly (a few µs per edge), so at low frequencies those edges are a small part of
-/// the period and even small duty cycles come out clean. The price is an audible whine.
-/// To compare frequencies, change this (e.g. 100 Hz, 250 Hz, 1 kHz), reflash and rerun the
-/// deadband test (`MOTOR_TEST_ENABLED`); the log notes the frequency of each run.
-const MOTOR_PWM_FREQUENCY: Rate = Rate::from_khz(1);
+/// PWM frequency for the L298N enable pins. 100 Hz: the TT motors start at a lower duty
+/// and keep turning down to a lower duty than at 1 kHz (see "Known limitations" in
+/// CLAUDE.md), probably because each pulse is long enough to build up current and torque
+/// despite the motor's inductance and the L298N's slow edges. The price is an audible
+/// low whine and a ripple at 100 Hz (the control loop runs at 500 Hz, so a command is
+/// updated several times per PWM period). The LEDC timer needs a clock divider in range:
+/// at 10-bit duty the lowest possible frequency is about 78 Hz. To compare frequencies,
+/// change this, reflash and rerun the deadband test (`MOTOR_TEST_ENABLED`); the log notes
+/// the frequency of each run.
+const MOTOR_PWM_FREQUENCY: Rate = Rate::from_hz(100);
 
 /// Motor test: how long each duty step lasts. Long enough to see whether the wheel
 /// turns (a TT motor spins up in well under 0.1 s).
