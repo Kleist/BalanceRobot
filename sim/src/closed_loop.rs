@@ -110,15 +110,29 @@ impl Sim {
         })
     }
 
-    /// The prototype robot with `gains`, let go at `start_pitch_deg`.
+    /// The prototype robot (motor with deadband) with `gains`, let go at
+    /// `start_pitch_deg`.
     ///
     /// # Errors
     ///
     /// See [`Sim::new`].
     pub fn prototype(gains: Gains, start_pitch_deg: f64) -> Result<Self, CalibrationError> {
+        Self::with_motor(Motor::prototype(), gains, start_pitch_deg)
+    }
+
+    /// The prototype robot, but with `motor` (e.g. [`Motor::ideal`]).
+    ///
+    /// # Errors
+    ///
+    /// See [`Sim::new`].
+    pub fn with_motor(
+        motor: Motor,
+        gains: Gains,
+        start_pitch_deg: f64,
+    ) -> Result<Self, CalibrationError> {
         Self::new(
             Body::prototype(),
-            Motor::prototype(),
+            motor,
             ImuParams::prototype(),
             gains,
             start_pitch_deg,
@@ -218,9 +232,11 @@ mod tests {
     use balance_core::control::{Config, Gains};
 
     use super::Sim;
+    use crate::motor::Motor;
 
+    /// With the ideal (linear) motor.
     fn run(kp: f32, ki: f32, kd: f32, seconds: f64) -> super::Run {
-        Sim::prototype(Gains { kp, ki, kd }, 2.0)
+        Sim::with_motor(Motor::ideal(), Gains { kp, ki, kd }, 2.0)
             .unwrap()
             .run(seconds)
     }
@@ -259,5 +275,70 @@ mod tests {
             "{}",
             r.max_abs_pitch_deg(5.0)
         );
+    }
+
+    // With the deadband (`Motor::prototype`). Expected beforehand: the PID,
+    // tuned on the ideal motor, falls or limit-cycles, because the commands
+    // it needs (mostly < 0.2) are near or inside the deadband. Found instead:
+    // it stays up (from 0.5-10°, 5 noise seeds, even with a 40 % start duty),
+    // but in one of two ways that both show up as drift on the real robot.
+
+    #[test]
+    fn deadband_pid_stays_up_by_rolling_steadily() {
+        // Usually it settles into a steady roll at a few cm/s: the wheels
+        // never stand still, so only the (low) stop duty matters, and the I
+        // term supplies that offset. Constant speed with the body upright is
+        // an equilibrium of a tilt-only controller, and the deadband rules
+        // out the speeds near 0.
+        let gains = Config::PROTOTYPE.gains;
+        let r = Sim::prototype(gains, 2.0).unwrap().run(10.0);
+        assert_eq!(r.fell_at_s, None);
+        assert!(
+            r.max_abs_pitch_deg(5.0) < 0.1,
+            "{}",
+            r.max_abs_pitch_deg(5.0)
+        );
+        let slowest = r
+            .ticks
+            .iter()
+            .filter(|t| t.t_s >= 5.0)
+            .map(|t| t.axle_vel_m_s.abs())
+            .fold(f64::INFINITY, f64::min);
+        // Never stops in the last 5 s (seed 1: ~0.027 m/s, ~0.2 m in 10 s).
+        assert!(slowest > 0.01, "{slowest}");
+    }
+
+    #[test]
+    fn deadband_pid_can_stick_slip() {
+        // From a small tilt it can instead fall into a stick-slip limit
+        // cycle: the wheels stand until the growing command breaks them
+        // loose, then turn briefly and stop again. Seed 4 from 0.5°: period
+        // ~0.40 s (2.5 Hz), pitch ±0.3°, wheel speed pulses of ~0.02 m/s,
+        // creeping forward, until it switches to the steady roll after ~8.5 s.
+        let gains = Config::PROTOTYPE.gains;
+        let mut sim = Sim::new(
+            crate::pendulum::Body::prototype(),
+            Motor::prototype(),
+            crate::imu::ImuParams::prototype(),
+            gains,
+            0.5,
+            4,
+        )
+        .unwrap();
+        let r = sim.run(10.0);
+        assert_eq!(r.fell_at_s, None);
+        let window: Vec<_> = r
+            .ticks
+            .iter()
+            .filter(|t| (1.0..7.0).contains(&t.t_s))
+            .collect();
+        let stops = window
+            .windows(2)
+            .filter(|w| w[0].axle_vel_m_s.abs() >= 0.005 && w[1].axle_vel_m_s.abs() < 0.005)
+            .count();
+        // ~15 cycles in 6 s.
+        assert!((12..=18).contains(&stops), "{stops}");
+        let swing = window.iter().map(|t| t.pitch_deg.abs()).fold(0.0, f64::max);
+        assert!((0.2..1.0).contains(&swing), "{swing}");
     }
 }

@@ -3,7 +3,7 @@
 //! `cargo run --release -p sim --example tune`
 //!
 //! Each candidate is let go at 5° and run for 10 s. It must stay up on the
-//! prototype's motor model *and* on variations of it (motor half as fast or
+//! prototype's ideal (linear, no deadband) motor model *and* on variations of it (motor half as fast or
 //! with twice the lag, latency doubled), because the model parameters are
 //! partly guesses.
 //!
@@ -19,7 +19,9 @@ use sim::{closed_loop::Sim, imu::ImuParams, motor::Motor, pendulum::Body};
 /// Worst case over the motor variants: (largest |pitch| in degrees, largest
 /// |axle speed| in m/s), both over the last 5 s. `None` if any variant fell.
 fn worst_case(gains: Gains) -> Option<(f64, f64)> {
-    let base = Motor::prototype();
+    // The ideal motor: the deadband (`Motor::prototype`) needs compensation
+    // in the controller first, and then the tuning is done on that.
+    let base = Motor::ideal();
     let variants = [
         base,
         Motor {
