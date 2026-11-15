@@ -39,8 +39,22 @@
 //! state of its own. A wheel that reverses passes through "standing" and
 //! then needs the start duty again, like the real one.
 //!
-//! Still missing: battery sag, gear backlash, and the load (the body)
-//! slowing the motor.
+//! # Battery voltage
+//!
+//! The motor's speed follows the voltage it gets: duty × battery voltage.
+//! [`Motor::battery_v`] scales the duty by `battery_v / REFERENCE_V` before
+//! the rules above, so all speeds and deadband duties hold at
+//! [`REFERENCE_V`] (the pack's nominal 7.4 V). A sagging or empty pack is a
+//! lower `battery_v`. The duty can then exceed 1 on a full pack: the motor
+//! gets more than the reference voltage and turns faster than `v_max`.
+//!
+//! Still missing: gear backlash, sag that depends on the current, and the
+//! load (the body) slowing the motor.
+
+/// Battery voltage at which [`Motor`]'s speed and deadband hold, in volts
+/// (nominal 2S Li-ion). The measurements weren't taken at a known voltage,
+/// so this is a convention, not a measured fact.
+pub const REFERENCE_V: f64 = 7.4;
 
 /// First-order motor model for both wheels together.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,6 +65,8 @@ pub struct Motor {
     pub time_constant_s: f64,
     /// PWM deadband, or `None` for a linear motor.
     pub deadband: Option<Deadband>,
+    /// Battery voltage in volts; [`REFERENCE_V`] means no change.
+    pub battery_v: f64,
 }
 
 /// The duty a wheel needs to start and to keep turning; see the module docs.
@@ -106,6 +122,7 @@ impl Motor {
             max_speed_m_s: 0.41,
             time_constant_s: 0.05,
             deadband: None,
+            battery_v: REFERENCE_V,
         }
     }
 
@@ -118,11 +135,17 @@ impl Motor {
         }
     }
 
-    /// Axle acceleration in m/s² with command `cmd` (−1..=1, clamped) while
-    /// the axle moves at `axle_vel_m_s`.
+    /// This motor with the battery at `battery_v` volts.
+    #[must_use]
+    pub const fn at_battery(self, battery_v: f64) -> Self {
+        Self { battery_v, ..self }
+    }
+
+    /// Axle acceleration in m/s² with duty `cmd` (−1..=1, clamped, then
+    /// scaled by the battery voltage) while the axle moves at `axle_vel_m_s`.
     #[must_use]
     pub fn axle_accel(&self, cmd: f64, axle_vel_m_s: f64) -> f64 {
-        let cmd = cmd.clamp(-1.0, 1.0);
+        let cmd = cmd.clamp(-1.0, 1.0) * self.battery_v / REFERENCE_V;
         let target = self.deadband.map_or(cmd, |d| d.target(cmd, axle_vel_m_s));
         (target * self.max_speed_m_s - axle_vel_m_s) / self.time_constant_s
     }
@@ -181,6 +204,35 @@ mod tests {
         let m = Motor::prototype();
         let a = m.axle_accel(0.05, 0.1);
         assert!((a - (-0.1 / 0.05)).abs() < 1e-9, "{a}");
+    }
+
+    #[test]
+    fn drive_gives_the_same_speed_at_any_battery_voltage() {
+        // With balance-core's deadband compensation and battery scaling, a
+        // turning wheel settles at command × v_max, as with the ideal motor
+        // at 7.4 V, whatever the battery voltage.
+        use balance_core::drive::{Compensation, Drive};
+        for v in [6.4_f32, 6.8, 7.4, 8.4] {
+            let m = Motor::prototype().at_battery(f64::from(v));
+            let duty = f64::from(Drive::PROTOTYPE.duty(0.3, v));
+            let a = m.axle_accel(duty, 0.3 * 0.41);
+            assert!(a.abs() < 1e-4, "{v} V: {a}");
+        }
+        // Without scaling, a full pack drives the wheel faster.
+        let m = Motor::prototype().at_battery(8.4);
+        let duty = f64::from(Compensation::PROTOTYPE.map(0.3));
+        assert!(m.axle_accel(duty, 0.3 * 0.41) > 0.1);
+    }
+
+    #[test]
+    fn higher_battery_voltage_turns_faster() {
+        let full = Motor::ideal().at_battery(8.4);
+        let target = 0.5 * 8.4 / 7.4 * 0.41;
+        assert!(full.axle_accel(0.5, target).abs() < 1e-9);
+        let empty = Motor::prototype().at_battery(6.4);
+        // 19 % duty at 6.4 V is only 16.4 % at the reference voltage: below
+        // the start duty, so a standing wheel stays put.
+        assert!(empty.axle_accel(0.19, 0.0).abs() < 1e-12);
     }
 
     #[test]
