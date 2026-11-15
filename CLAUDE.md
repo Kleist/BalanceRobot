@@ -101,7 +101,7 @@ cargo build --release
 
 ## Bring-up plan
 
-Small steps, one PR each, in order. Tick steps off as they are completed; insert new steps anywhere.
+Small steps, one PR each, in order. Tick steps off as they are completed; insert new steps anywhere. The open steps are grouped (A-D) towards a first balance attempt as early as possible: only the simulation work that attempt needs comes before it.
 
 - [x] Create this CLAUDE.md
 - [x] CI + `balance-core` skeleton: fmt, clippy, unit tests, no_std check, docs, coverage report
@@ -136,19 +136,38 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [x] Control step in `balance-core` (`control::Controller::step(&RawSample, dt) -> Output`: axis mapping, bias, accel/gyro/filter pitch, PID -> motor command) so firmware and simulator run the same code. Settings in `control::Config::PROTOTYPE` (gains 0 for now); the firmware computes the command but doesn't apply it yet
 - [x] Simulation physics fix: include the motors' reaction torque on the body (the wheels are driven from the body, not pushed like a cart). Makes the axle acceleration ~40 % more effective (holding a tilt needs ~58 % of g·tan θ) and the fall slower (τ 0.125 s instead of 0.111 s)
 - [x] Simulation: close the loop (complementary filter + PID at 500 Hz) and tune P, D, I in simulation. Ideal first-order motor (v_max 0.41 m/s measured: 10 turns in 5 s at full duty, wheels in the air). Findings: P and PD can't balance (PD holds ~1.5 s, then runs away); PID kp 0.12, ki 2.0, kd 0.008 settles from 5° in ~1 s (~2 Hz wobble) and drifts a few cm per 10 s; survives motor speed ±40 % and lag ×0.5/×2. The commands it needs are small (mostly < 0.2), far inside the real deadband (12-36 %), so the motor model and deadband compensation are essential before trying it on the robot
-- [ ] Simulation: motor model (PWM deadband, saturation, battery sag, gear backlash) and a "stays upright" test in CI; refine parameters with numbers measured on the robot
 - [x] Check the IMU axes and the balance point with the robot upright (balanced = 0°, forward = positive): +X up, +Z forward, pitch rate = −gy, balance point −3.8°
-- [ ] Signed motor command `Motor::set(-1.0..=1.0)` (via `clamp_duty`); check +1 drives the robot forward on both wheels
-- [ ] Deadband + battery-voltage compensation of the motor command (math in `balance-core`); re-measure the deadband at a known battery voltage
-- [ ] Safety cut-offs: motors off when fallen (|pitch| > ~45°) and on low battery (warn < ~6.6 V, off < ~6.4 V)
-- [ ] Sign check with the wheels in the air: tiny-gain "wheels follow the tilt", tilting forward spins the wheels forward
-- [ ] Tilt loop on the robot with the simulated PID gains (P-only and PD won't balance, see the simulation step), then tune
+
+**A. Drive the motors from code (firmware, wheels in the air)**
+
+- [ ] Signed motor command: `Motor::set(-1.0..=1.0)` via `balance_core::clamp_duty` (direction pins + PWM duty; 0 = stop). Check: a fixed +0.5 turns both wheels the way that drives the robot forward; record left/right and polarity in `docs/wiring.md`
+- [ ] Deadband at lower PWM frequency: rerun the existing deadband test (`MOTOR_TEST_ENABLED`) at e.g. 100 Hz and 250 Hz next to 1 kHz, noting the battery voltage. Pick the frequency with the smallest start duty; update `MOTOR_PWM_FREQUENCY` and the deadband table in "Known limitations"
+- [ ] Safety cut-offs (math in `balance-core`, unit tested): motors off when fallen (|filter pitch| > ~45°, re-arm when held upright again) and on low battery (warn < ~6.6 V, off < ~6.4 V). Check: tilt past 45° and see the log report the cut-off
+
+**B. Deadband in simulation and in the controller**
+
+- [ ] Simulation: deadband in `sim::motor` with the measured start/stop duties (hysteresis: a standing wheel needs the start duty, a turning wheel keeps going down to the stop duty). Expected finding: the tuned PID no longer balances, or limit-cycles; a test documents it
+- [ ] Deadband compensation in `balance-core` (maps the controller's command onto the duty range where the wheels actually move; small dead zone around 0 to avoid chatter), applied after `Controller::step`. Verified in simulation; add a "stays upright for 10 s" test that runs in CI
+- [ ] Battery-voltage scaling of the command (same wheel speed per command at 7 V and 8.4 V), math in `balance-core`; simulated with a sag parameter
+
+**C. First balance attempt on the robot**
+
+- [ ] Add `motor_cmd` (and the applied duty) as CSV columns in the firmware log and in `sim::log`; update the log-format description in "Software stack"
+- [ ] Sign check, wheels in the air: controller output applied to the motors with small gains; tilting forward spins the wheels forward, the cut-off stops them past 45°
+- [ ] First balance attempt with the simulated PID gains (P-only and PD won't balance, see the simulation step), on the floor, hand ready. Save the log
+- [ ] Compare the robot log with the simulation of the same start; adjust the sim motor parameters (lag, wheel inertia, deadband) until they agree, then re-tune in simulation and on the robot
+
+**D. After it balances**
+
+- [ ] Simulation: gear backlash in the motor model, if the log comparison shows it matters (limit cycle around upright)
+- [ ] Drift: estimate the wheel speed from the integrated motor command and feed it back (no encoders), tried in simulation first
+- [ ] Battery under load: check sag and brownouts while balancing; add bulk capacitance if needed (see "Power notes")
 - [ ] BLE: advertise and show up on the phone
 - [ ] BLE GATT control (steering / setpoint) from Android
 
 ## Known limitations of the prototype
 
-- No encoders: can do tilt control only, no speed/position hold, so expect drift. Partial mitigation: feed back the integrated motor command.
+- No encoders: can do tilt control only, no speed/position hold, so expect drift. Partial mitigation: feed back the integrated motor command (bring-up plan, group D).
 - TT motor gear backlash will make tuning harder.
 - Large PWM deadband with hysteresis (1 kHz PWM, 2S pack, wheels off the ground, 2 % steps; measured 2026-11-08). A standing wheel needs 30-36 % duty to start; a turning wheel keeps going down to 12-14 %:
 
