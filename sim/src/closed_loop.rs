@@ -343,9 +343,11 @@ mod tests {
     fn deadband_pid_can_stick_slip() {
         // From a small tilt it can instead fall into a stick-slip limit
         // cycle: the wheels stand until the growing command breaks them
-        // loose, then turn briefly and stop again. Seed 4 from 0.5°: period
-        // ~0.40 s (2.5 Hz), pitch ±0.3°, wheel speed pulses of ~0.02 m/s,
-        // creeping forward, until it switches to the steady roll after ~8.5 s.
+        // loose, then turn briefly and stop again. Rare: of seeds 0-29 from
+        // 0.5°, only seed 5 does it (8 stops in 1-7 s, pitch up to ±0.5°); the
+        // others settle into the steady roll. Which seed depends on how the
+        // noise lands, so it changed when the IMU axes were corrected (front
+        // = closed side; seed 4 did it before).
         let gains = Config::PROTOTYPE.gains;
         let mut sim = Sim::new(
             crate::pendulum::Body::prototype(),
@@ -353,7 +355,7 @@ mod tests {
             crate::imu::ImuParams::prototype(),
             gains,
             0.5,
-            4,
+            5,
         )
         .unwrap();
         let r = sim.run(10.0);
@@ -367,8 +369,8 @@ mod tests {
             .windows(2)
             .filter(|w| w[0].axle_vel_m_s.abs() >= 0.005 && w[1].axle_vel_m_s.abs() < 0.005)
             .count();
-        // ~15 cycles in 6 s.
-        assert!((12..=18).contains(&stops), "{stops}");
+        // 8 stops in 6 s.
+        assert!((5..=12).contains(&stops), "{stops}");
         let swing = window.iter().map(|t| t.pitch_deg.abs()).fold(0.0, f64::max);
         assert!((0.2..1.0).contains(&swing), "{swing}");
     }

@@ -46,9 +46,10 @@
 //! # Axes
 //!
 //! Same mapping as the firmware's `robot_axes` / `robot_pitch_rate`: the
-//! board stands upright, IMU +X = up, +Z = forward, +Y = right (along the
-//! axle). Tipping forward is a negative rotation about +Y, so the gyro reads
-//! **minus** the pitch rate on Y. The robot doesn't move sideways or turn in
+//! robot's front is the closed side of the body; the board stands upright,
+//! IMU +X = up, +Z = backward, +Y = left (along the axle). So the chip's Z
+//! reads **minus** the forward specific force. Tipping forward is a positive
+//! rotation about +Y, so the gyro reads the pitch rate on Y. The robot doesn't move sideways or turn in
 //! this model, so accel Y and gyro X/Z read only their bias and noise.
 
 use balance_core::imu::RawSample;
@@ -101,9 +102,9 @@ impl ImuParams {
 
     /// The prototype's IMU, measured on 2026-11-15:
     ///
-    /// - position: 12.7 cm above the axle and 1.5 cm ahead of it (the board
-    ///   sits on the front of the battery pack, 1.5 cm in front of the
-    ///   centre of mass). That is below the centre of percussion for a fall
+    /// - position: 12.7 cm above the axle and 1.5 cm behind it (the board
+    ///   sits on the open side of the battery pack; the front is the closed
+    ///   side). That is below the centre of percussion for a fall
     ///   with the axle held still ((I + m·d·r)/(m·d) ≈ 15.4 cm), close
     ///   enough that at the start of such a fall the accel pitch shows only
     ///   about a fifth of the real tilt (see the tests).
@@ -111,7 +112,7 @@ impl ImuParams {
     /// The rest is from a 60 s log of the robot lying still (`log_stats`
     /// example):
     ///
-    /// - mount tilt −3.8°: the accel pitch with the robot held at its balance
+    /// - mount tilt +3.8°: the accel pitch with the robot held at its balance
     ///   point (the firmware's `BALANCE_PITCH_DEG`). Whether that is the board
     ///   sitting crooked or an accelerometer offset can't be told apart from
     ///   one position; the model puts it all in the tilt.
@@ -131,7 +132,7 @@ impl ImuParams {
         Self {
             height_above_axle_m: 0.127,
             ahead_of_axle_m: -0.015,
-            mount_tilt_deg: -3.8,
+            mount_tilt_deg: 3.8,
             accel_noise_lsb: [13.0, 20.0, 18.0],
             gyro_noise_lsb: [8.0, 6.0, 6.0],
             accel_bias_lsb: [0.0; 3],
@@ -201,9 +202,10 @@ impl Imu {
         let (sin, cos) = p.mount_tilt_deg.to_radians().sin_cos();
         let chip_forward = forward * cos - up * sin;
         let chip_up = forward * sin + up * cos;
-        let accel_true = [chip_up, 0.0, chip_forward].map(|a| a / G * ACCEL_LSB_PER_G);
+        // +Z points backward, so it reads minus the forward component.
+        let accel_true = [chip_up, 0.0, -chip_forward].map(|a| a / G * ACCEL_LSB_PER_G);
         let pitch_rate_dps = state.pitch_rate_rad_s.to_degrees();
-        let gyro_true = [0.0, -pitch_rate_dps * GYRO_LSB_PER_DPS, 0.0];
+        let gyro_true = [0.0, pitch_rate_dps * GYRO_LSB_PER_DPS, 0.0];
 
         let mut accel = [0; 3];
         let mut gyro = [0; 3];
@@ -237,7 +239,7 @@ fn quantise(lsb: f64) -> i16 {
 
 #[cfg(test)]
 mod tests {
-    use balance_core::attitude::accel_pitch_deg;
+    use balance_core::{attitude::accel_pitch_deg, control::robot_axes};
 
     use super::{G, Imu, ImuParams, specific_force};
     use crate::pendulum::{Body, State};
@@ -264,41 +266,44 @@ mod tests {
     fn held_at_30_degrees_reads_gravity_rotated() {
         let raw = ideal(0.1).sample(&State::tilted_deg(30.0), 0.0, 0.0);
         // Up (X): cos 30° · 8192 = 7094.5 → 7094 after rounding.
-        // Forward (Z): −sin 30° · 8192 = −4096.
-        assert_eq!(raw.accel, [7094, 0, -4096]);
-        let pitch = accel_pitch_deg(f32::from(raw.accel[2]), f32::from(raw.accel[0]));
+        // Forward: −sin 30° · 8192 = −4096, so Z (backward) reads +4096.
+        assert_eq!(raw.accel, [7094, 0, 4096]);
+        let (forward, up) = robot_axes(raw.accel);
+        let pitch = accel_pitch_deg(forward, up);
         assert!((pitch - 30.0).abs() < 0.01, "{pitch}");
     }
 
     #[test]
-    fn gyro_reads_minus_the_pitch_rate_on_y() {
+    fn gyro_reads_the_pitch_rate_on_y() {
         let raw = ideal(0.1).sample(&rotating(10.0), 0.0, 0.0);
-        assert_eq!(raw.gyro, [0, -655, 0]);
+        assert_eq!(raw.gyro, [0, 655, 0]);
     }
 
     #[test]
     fn mount_tilt_is_the_accel_pitch_when_balanced() {
         let params = ImuParams {
-            mount_tilt_deg: -3.8,
+            mount_tilt_deg: 3.8,
             ..ImuParams::ideal(0.1)
         };
         let raw = Imu::new(params, 1).sample(&State::default(), 0.0, 0.0);
-        let pitch = accel_pitch_deg(f32::from(raw.accel[2]), f32::from(raw.accel[0]));
-        assert!((pitch + 3.8).abs() < 0.01, "{pitch}");
+        let (forward, up) = robot_axes(raw.accel);
+        let pitch = accel_pitch_deg(forward, up);
+        assert!((pitch - 3.8).abs() < 0.01, "{pitch}");
     }
 
     #[test]
     fn readings_clip_at_the_range() {
         let mut imu = ideal(0.0);
-        assert_eq!(imu.sample(&rotating(-1000.0), 0.0, 0.0).gyro[1], 32767);
-        assert_eq!(imu.sample(&rotating(1000.0), 0.0, 0.0).gyro[1], -32767);
+        assert_eq!(imu.sample(&rotating(1000.0), 0.0, 0.0).gyro[1], 32767);
+        assert_eq!(imu.sample(&rotating(-1000.0), 0.0, 0.0).gyro[1], -32767);
     }
 
     #[test]
     fn axle_acceleration_shows_up_on_forward() {
-        // Upright, held, axle speeding up at 0.5 g: forward (Z) reads +0.5 g.
+        // Upright, held, axle speeding up at 0.5 g: forward reads +0.5 g, so
+        // Z (backward) reads −0.5 g.
         let raw = ideal(0.1).sample(&State::default(), 0.0, 0.5 * G);
-        assert_eq!(raw.accel, [8192, 0, 4096]);
+        assert_eq!(raw.accel, [8192, 0, -4096]);
     }
 
     #[test]
