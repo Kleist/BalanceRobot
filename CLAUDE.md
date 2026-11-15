@@ -153,7 +153,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 **C. First balance attempt on the robot**
 
 - [ ] Add `motor_cmd` (and the applied duty) as CSV columns in the firmware log and in `sim::log`; update the log-format description in "Software stack"
-- [ ] Sign check, wheels in the air: controller output applied to the motors with small gains; tilting forward spins the wheels forward, the cut-off stops them past 45°
+- [ ] Sign check, wheels in the air: controller output applied to the motors with small gains; tilting forward spins the wheels forward, the cut-off stops them past 45°. Firmware: `CONTROL_ENABLED` (off by default) applies `motor_cmd` to both motors while the safety cut-offs allow it; `CONTROL_GAINS` = `SIGN_CHECK_GAINS` (P only, kp 0.03/°: wheels start at ~6-7° of tilt, full power only at 33°)
 - [ ] First balance attempt with the simulated PID gains (P-only and PD won't balance, see the simulation step), on the floor, hand ready. Save the log
 - [ ] Compare the robot log with the simulation of the same start; adjust the sim motor parameters (lag, wheel inertia, deadband) until they agree, then re-tune in simulation and on the robot
 
