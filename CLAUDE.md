@@ -140,9 +140,9 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 
 **A. Drive the motors from code (firmware, wheels in the air)**
 
-- [ ] Signed motor command: `Motor::set(-1.0..=1.0)` via `balance_core::clamp_duty` (direction pins + PWM duty; 0 = stop). Check: a fixed +0.5 turns both wheels the way that drives the robot forward; record left/right and polarity in `docs/wiring.md`
+- [x] Signed motor command: `Motor::set(-1.0..=1.0)` via `balance_core::clamp_duty` (direction pins + PWM duty; 0 = stop). Check: a fixed +0.5 turns both wheels the way that drives the robot forward; record left/right and polarity in `docs/wiring.md`
 - [x] Deadband at lower PWM frequency: rerun the existing deadband test (`MOTOR_TEST_ENABLED`) at e.g. 100 Hz and 250 Hz next to 1 kHz, noting the battery voltage. Pick the frequency with the smallest start duty; update `MOTOR_PWM_FREQUENCY` and the deadband table in "Known limitations"
-- [ ] Safety cut-offs (`balance_core::safety::Safety`, unit tested): motors off when fallen (|filter pitch| > 45°, re-arm only when held within 5° again; off at power-up until held upright once) and on low battery (warn < 6.6 V, off < 6.4 V; each needs 1 s below the threshold so a sag under load doesn't count, and both latch until reboot). Firmware logs each change as `# safety: ...` and gates the motor test / direction check with it (the controller's command isn't applied yet). Check: tilt past 45° and see the log report the cut-off
+- [ ] Safety cut-offs (`balance_core::safety::Safety`, unit tested): motors off when fallen (|filter pitch| > 45°, re-arm only when held within 5° again; off at power-up until held upright once) and on low battery (warn < 6.6 V, off < 6.4 V; each needs 1 s below the threshold so a sag under load doesn't count, and both latch until reboot). Firmware logs each change as `# safety: ...` and gates the motor test / direction check with it (and the controller's command, see the sign check in C). Check: tilt past 45° and see the log report the cut-off
 
 **B. Deadband in simulation and in the controller**
 

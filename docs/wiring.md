@@ -31,7 +31,10 @@ flowchart LR
 ```
 
 Which motor is "left" and which is "right" is decided when the motors are
-connected; record it in the table below.
+connected; it is recorded in the table below. Checked on the robot with
+`Motor::set(+0.5)` (`MOTOR_CHECK_ENABLED`): the left motor is the one on
+OUT1 / OUT2 (IN1 / IN2, ENA) and the right one is on OUT3 / OUT4 (IN3 / IN4, ENB).
+Command +1 (IN_a high, IN_b low) turns both wheels forward, with the wiring as it is.
 
 ## Connections
 
@@ -51,8 +54,8 @@ connected; record it in the table below.
 | ESP32-C3 GND | L298N GND | Common ground | ✅ | GND only, not 5 V, while the board runs on USB |
 | Battery + | L298N +12V (VS) | Motor supply 6.4-8.4 V | ✅ | Never to the board's BAT+ (single cell only) |
 | Battery − | L298N GND | | ✅ | |
-| L298N OUT1 / OUT2 | Left motor | | ✅ | Swap the two wires if the motor runs backwards |
-| L298N OUT3 / OUT4 | Right motor | | ✅ | |
+| L298N OUT1 / OUT2 | Left motor | | ✅ | Verified: `set(+x)` turns it forward with this polarity |
+| L298N OUT3 / OUT4 | Right motor | | ✅ | Verified: `set(+x)` turns it forward with this polarity |
 | Battery + → 100 kΩ → GPIO4 → 33 kΩ → GND | ESP32-C3 GPIO4 | Battery voltage sense (ADC1) | ✅ | 8.4 V × 33 / 133 ≈ 2.1 V |
 | (spare) | ESP32-C3 GPIO5 | GY-521 INT, if that IMU is ever used | ⬜ | |
 
