@@ -760,6 +760,10 @@ async fn setup_motors(
 /// The 500 Hz loop: read the IMU, update the filters, run the motor test, queue log
 /// messages. Runs on the interrupt executor, so it preempts the thread-mode tasks.
 #[embassy_executor::task]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one iteration in order, top to bottom: splitting it would hide the order of battery, tests, IMU, control, safety and logging"
+)]
 async fn control_loop(parts: ControlParts) {
     let (mut left, mut right) = setup_motors(parts.ledc, parts.left, parts.right).await;
     let ControlParts {
