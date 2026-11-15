@@ -130,7 +130,7 @@ impl ImuParams {
     pub const fn prototype() -> Self {
         Self {
             height_above_axle_m: 0.127,
-            ahead_of_axle_m: 0.015,
+            ahead_of_axle_m: -0.015,
             mount_tilt_deg: -3.8,
             accel_noise_lsb: [13.0, 20.0, 18.0],
             gyro_noise_lsb: [8.0, 6.0, 6.0],
