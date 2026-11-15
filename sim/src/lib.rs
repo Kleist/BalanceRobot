@@ -7,7 +7,8 @@
 //! ([`motor`]) and the closed loop
 //! ([`closed_loop`]) running the same `balance-core` controller as the
 //! firmware, optionally with its deadband compensation and battery scaling
-//! (`balance_core::drive`).
+//! (`balance_core::drive`), and [`robot_log`] to read a balance attempt back
+//! from the robot's log and compare it with the simulation.
 
 pub mod closed_loop;
 pub mod imu;
@@ -15,3 +16,4 @@ pub mod log;
 pub mod motor;
 pub mod noise;
 pub mod pendulum;
+pub mod robot_log;
