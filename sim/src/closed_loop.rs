@@ -395,12 +395,15 @@ mod tests {
     #[test]
     fn compensated_stays_upright_for_10_s() {
         // The CI check that the whole chain balances: from small and large
-        // tilts, on a full, nominal and nearly empty pack.
+        // tilts, on a full, nominal and nearly empty pack. After 5 s the pitch
+        // stays within ~0.03° (steady roll) or ±0.5° (stick-slip, see below);
+        // seed 1 does the latter from 2° and at 6.4 / 8.4 V. 1° means
+        // "clearly balancing" either way.
         for (start, battery_v) in [(2.0, 7.4), (10.0, 7.4), (5.0, 8.4), (5.0, 6.4)] {
             let r = with_drive(start, 1, battery_v);
             assert_eq!(r.fell_at_s, None, "{start}° at {battery_v} V");
             let p = r.max_abs_pitch_deg(5.0);
-            assert!(p < 0.1, "{start}° at {battery_v} V: {p}");
+            assert!(p < 1.0, "{start}° at {battery_v} V: {p}");
         }
     }
 
@@ -422,10 +425,11 @@ mod tests {
     #[test]
     fn compensated_still_stick_slips_near_zero_speed() {
         // When the robot settles at (almost) zero speed, a standing wheel
-        // needs the start duty, which the compensation doesn't give. Seed 5
-        // from 2°: ~18 stops in the last 5 s, pitch RMS ~0.4°, but it stays
-        // up.
-        let r = with_drive(2.0, 5, 7.4);
+        // needs the start duty, which the compensation doesn't give. From 2°,
+        // 6 of seeds 0-19 end like this (after the IMU axes fix; the seeds
+        // changed with it). Seed 4: 18 stops in the last 5 s, pitch up to
+        // ±0.6°, but it stays up.
+        let r = with_drive(2.0, 4, 7.4);
         assert_eq!(r.fell_at_s, None);
         let stops = r
             .ticks
