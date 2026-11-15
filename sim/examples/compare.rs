@@ -20,8 +20,10 @@
 //! - `--seed N`: the simulated IMU's noise (default 1).
 //! - `--gains KP KI KD`: other gains than `Config::PROTOTYPE`.
 //! - motor parameters to fit the simulation to the robot: `--vmax M_S`
-//!   (0.41), `--lag-ms MS` (50), `--start-duty D` and `--stop-duty D`
-//!   (0.19 / 0.08, as fractions), `--ideal` (no deadband).
+//!   (0.41), `--lag-ms MS` (50), `--dead-ms MS` (0: dead time before the
+//!   motor reacts at all, in whole 2 ms controller periods),
+//!   `--start-duty D` and `--stop-duty D` (0.19 / 0.08, as fractions),
+//!   `--ideal` (no deadband).
 //! - `--synthetic START_DEG`: instead of reading a log, make one with the
 //!   simulation (from `START_DEG`, prototype motor, seed 2) and compare that:
 //!   a check of the tool itself.
@@ -55,6 +57,7 @@ struct Options {
     seed: u64,
     gains: Gains,
     motor: Motor,
+    dead_time_ticks: usize,
     synthetic: Option<f64>,
     path: Option<String>,
 }
@@ -66,6 +69,7 @@ fn parse_args() -> Result<Options, String> {
         seed: 1,
         gains: Config::PROTOTYPE.gains,
         motor: Motor::prototype(),
+        dead_time_ticks: 0,
         synthetic: None,
         path: None,
     };
@@ -107,6 +111,12 @@ fn parse_args() -> Result<Options, String> {
             }
             "--vmax" => o.motor.max_speed_m_s = num("--vmax")?,
             "--lag-ms" => o.motor.time_constant_s = num("--lag-ms")? * 1e-3,
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a few tens of ms from the command line"
+            )]
+            "--dead-ms" => o.dead_time_ticks = (num("--dead-ms")? / 2.0).round() as usize,
             "--start-duty" => deadband.start_duty = num("--start-duty")?,
             "--stop-duty" => deadband.stop_duty = num("--stop-duty")?,
             "--ideal" => ideal = true,
@@ -129,7 +139,10 @@ fn simulate(o: &Options, motor: Motor, start_deg: f64, duration_s: f64, seed: u6
         start_deg,
         seed,
     ) {
-        Ok(sim) => sim.with_drive(Drive::PROTOTYPE).run(duration_s),
+        Ok(sim) => sim
+            .with_drive(Drive::PROTOTYPE)
+            .with_dead_time_ticks(o.dead_time_ticks)
+            .run(duration_s),
         Err(e) => {
             eprintln!("simulated gyro calibration failed: {e:?}");
             std::process::exit(1);
@@ -238,7 +251,7 @@ fn main() {
             }
             eprintln!(
                 "usage: compare [--attempt N] [--every N] [--seed N] [--gains KP KI KD] \
-                 [--vmax M_S] [--lag-ms MS] [--start-duty D] [--stop-duty D] [--ideal] \
+                 [--vmax M_S] [--lag-ms MS] [--dead-ms MS] [--start-duty D] [--stop-duty D] [--ideal] \
                  [--synthetic START_DEG] [LOG]"
             );
             std::process::exit(2);
