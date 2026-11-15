@@ -169,7 +169,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 
 - No encoders: can do tilt control only, no speed/position hold, so expect drift. Partial mitigation: feed back the integrated motor command (bring-up plan, group D).
 - TT motor gear backlash will make tuning harder.
-- Large PWM deadband with hysteresis, wheels off the ground, 2 % steps. A standing wheel needs a minimum duty to start; a turning wheel keeps going down to a lower one. Measured 2026-11-08 and 2026-11-15 (battery voltage mostly not noted), so the numbers are only good to about ±10 points: the same 1 kHz setup gave left backward 32 % one day and 20 % the next. At 7.6 V the wheels did not start at 1 kHz even at 40 %. A lower PWM frequency helps: 100 Hz starts lower and stops lower than 1 kHz in every run, so the firmware uses 100 Hz. At 250 Hz the start duties were 20-25 % (stop not measured). The 100 Hz values are the later of two runs (the first gave 20-30 % to start):
+- Large PWM deadband with hysteresis, wheels off the ground, 2 % steps. A standing wheel needs a minimum duty to start; a turning wheel keeps going down to a lower one. Measured 2026-11-08 and 2026-11-15 (battery voltage mostly not noted), so the numbers are only good to about ±10 points: the same 1 kHz setup gave left backward 32 % one day and 20 % the next. At 7.6 V the wheels did not start at 1 kHz even at 40 %. A lower PWM frequency helps: 100 Hz starts lower and stops lower than 1 kHz in every run, so the firmware uses 100 Hz. At 250 Hz the start duties were 20-25 % and the stop duty 10 % for all four combinations. The 100 Hz values are the later of two runs (the first gave 20-30 % to start):
 
   | Motor | Direction | Starts at, 100 Hz | Stops at, 100 Hz | Starts at, 1 kHz (11-08) | Stops at, 1 kHz (11-08) |
   |---|---|---|---|---|---|
@@ -178,4 +178,4 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
   | Right | Forward | 22 % | 8 % | 30 % | 12 % |
   | Right | Backward | 20 % | 8 % | 34 % | 14 % |
 
-  Still to do: 100 / 250 / 1000 Hz back to back on one charge with the voltage noted, and the stop duties at 250 Hz and 1 kHz.
+  Still to do: 100 / 250 / 1000 Hz back to back on one charge with the voltage noted, and the stop duties at 1 kHz today.
