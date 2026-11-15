@@ -45,6 +45,26 @@ pub fn header(bias: GyroBias) -> String {
     )
 }
 
+/// The firmware's startup gyro calibration: the bias of samples taken while
+/// the robot is still.
+///
+/// # Errors
+///
+/// The calibrator's error when there are fewer than
+/// [`CALIBRATION_SAMPLES`] or the robot moved.
+pub fn calibrate_bias(
+    samples: impl IntoIterator<Item = RawSample>,
+) -> Result<GyroBias, CalibrationError> {
+    let mut calibrator = BiasCalibrator::new();
+    for sample in samples {
+        calibrator.add(CONFIG.gyro_dps(sample.gyro));
+    }
+    calibrator.finish(
+        CONFIG.calibration_samples,
+        CONFIG.calibration_max_spread_dps,
+    )
+}
+
 /// The firmware's per-sample processing after calibration.
 #[derive(Debug, Clone, Copy)]
 pub struct Pipeline {
@@ -63,14 +83,7 @@ impl Pipeline {
     pub fn calibrate(
         samples: impl IntoIterator<Item = RawSample>,
     ) -> Result<Self, CalibrationError> {
-        let mut calibrator = BiasCalibrator::new();
-        for sample in samples {
-            calibrator.add(CONFIG.gyro_dps(sample.gyro));
-        }
-        let bias = calibrator.finish(
-            CONFIG.calibration_samples,
-            CONFIG.calibration_max_spread_dps,
-        )?;
+        let bias = calibrate_bias(samples)?;
         Ok(Self {
             bias,
             controller: Controller::new(CONFIG, bias),
