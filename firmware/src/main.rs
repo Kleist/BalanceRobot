@@ -118,7 +118,8 @@ const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 250;
 /// PWM frequency for the L298N enable pins. 1 kHz is a compromise: the L298N switches
 /// slowly (a few µs per edge), so at low frequencies those edges are a small part of
 /// the period and even small duty cycles come out clean. The price is an audible whine.
-/// Revisit once the deadband has been measured.
+/// To compare frequencies, change this (e.g. 100 Hz, 250 Hz, 1 kHz), reflash and rerun the
+/// deadband test (`MOTOR_TEST_ENABLED`); the log notes the frequency of each run.
 const MOTOR_PWM_FREQUENCY: Rate = Rate::from_khz(1);
 
 /// Motor test: how long each duty step lasts. Long enough to see whether the wheel
@@ -301,6 +302,8 @@ enum LogMsg {
     Motor(TestStep),
     MotorError(channel::Error),
     MotorCmd(f32),
+    /// PWM frequency in Hz, logged once at the start.
+    PwmFrequency(u32),
     ImuError(I2cError),
 }
 
@@ -351,6 +354,7 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
         LogMsg::Motor(TestStep::Done) => {
             writeln!(line, "# motor test done (or disabled), motors off")
         }
+        LogMsg::PwmFrequency(hz) => writeln!(line, "# motor pwm frequency {hz} Hz"),
         LogMsg::MotorCmd(cmd) => writeln!(line, "# motor cmd {cmd:+.2} (both)"),
         LogMsg::MotorError(e) => writeln!(line, "# motor command failed: {e:?}"),
         LogMsg::ImuError(e) => writeln!(line, "# IMU read failed: {e:?}"),
@@ -731,6 +735,11 @@ async fn control_loop(parts: ControlParts) {
         }
         times.log_send = times.log_send.max(start.elapsed().as_micros());
     };
+
+    log(
+        &mut times,
+        LogMsg::PwmFrequency(MOTOR_PWM_FREQUENCY.as_hz()),
+    );
 
     let loop_start = Instant::now();
     let mut ticker = Ticker::every(SAMPLE_PERIOD);
