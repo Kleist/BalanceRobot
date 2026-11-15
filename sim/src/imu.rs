@@ -8,21 +8,25 @@
 //! fall it reads 0. So it sees gravity (which gives the tilt) **plus** any
 //! acceleration of the point where the chip sits.
 //!
-//! The chip sits on the body, `h` above the axle. When the body rotates, that
-//! point accelerates even if the axle doesn't move:
+//! The chip sits on the body, `h` above the axle and `f` ahead of it (in the
+//! body's frame: "up" is the line from the axle through the centre of mass).
+//! When the body rotates, that point accelerates even if the axle doesn't
+//! move:
 //!
-//! - **tangential** `h·θ''` along the body's forward axis (the body speeding
-//!   up its rotation),
-//! - **centripetal** `h·θ'²` towards the axle (the body rotating at all).
+//! - **tangential**, perpendicular to the line from the axle to the chip,
+//!   when the body speeds up its rotation: `h·θ''` forward and `f·θ''` down
+//!   (tipping forward lowers a point in front of the axle),
+//! - **centripetal**, towards the axle, when the body rotates at all:
+//!   `h·θ'²` down and `f·θ'²` backward.
 //!
 //! Adding the axle's own acceleration `a` and projecting onto the body axes:
 //!
 //! ```text
-//! forward = a·cos θ + h·θ'' − g·sin θ
-//! up      = a·sin θ − h·θ'² + g·cos θ
+//! forward = a·cos θ + h·θ'' − f·θ'² − g·sin θ
+//! up      = a·sin θ − f·θ'' − h·θ'² + g·cos θ
 //! ```
 //!
-//! With `h = 0` or the robot at rest, this is the pure gravity reading that
+//! With `h = f = 0` or the robot at rest, this is the pure gravity reading that
 //! `balance_core::attitude::accel_pitch_deg` assumes. Otherwise the accel
 //! pitch is wrong while the robot moves, which is why the firmware fuses it
 //! with the gyro.
@@ -62,6 +66,8 @@ pub const GYRO_LSB_PER_DPS: f64 = 65.5;
 pub struct ImuParams {
     /// Height of the chip above the axle in m.
     pub height_above_axle_m: f64,
+    /// How far the chip is ahead of the axle in m (behind: negative).
+    pub ahead_of_axle_m: f64,
     /// How far the chip is pitched forward relative to the body, in degrees:
     /// what its accel pitch reads when the body is balanced.
     pub mount_tilt_deg: f64,
@@ -78,12 +84,13 @@ pub struct ImuParams {
 }
 
 impl ImuParams {
-    /// A perfect IMU (square on the body, no noise, no bias) `height_m` above
-    /// the axle. Readings are still quantised.
+    /// A perfect IMU (square on the body, no noise, no bias) `height_m`
+    /// straight above the axle. Readings are still quantised.
     #[must_use]
     pub const fn ideal(height_m: f64) -> Self {
         Self {
             height_above_axle_m: height_m,
+            ahead_of_axle_m: 0.0,
             mount_tilt_deg: 0.0,
             accel_noise_lsb: [0.0; 3],
             gyro_noise_lsb: [0.0; 3],
@@ -92,10 +99,17 @@ impl ImuParams {
         }
     }
 
-    /// The prototype's IMU. Measured on 2026-11-15 from a 60 s log of the
-    /// robot lying still (`log_stats` example), unless marked as a guess:
+    /// The prototype's IMU, measured on 2026-11-15:
     ///
-    /// - height 10 cm: a guess, not measured yet.
+    /// - position: 12.7 cm above the axle and 1.5 cm ahead of it (the board
+    ///   sits on the front of the battery pack, 1.5 cm in front of the
+    ///   centre of mass). That is just above the centre of percussion
+    ///   (I/(m·d) ≈ 12.2 cm), so at the start of a fall the accel pitch
+    ///   barely moves (see the tests).
+    ///
+    /// The rest is from a 60 s log of the robot lying still (`log_stats`
+    /// example):
+    ///
     /// - mount tilt −3.8°: the accel pitch with the robot held at its balance
     ///   point (the firmware's `BALANCE_PITCH_DEG`). Whether that is the board
     ///   sitting crooked or an accelerometer offset can't be told apart from
@@ -114,7 +128,8 @@ impl ImuParams {
     #[must_use]
     pub const fn prototype() -> Self {
         Self {
-            height_above_axle_m: 0.10,
+            height_above_axle_m: 0.127,
+            ahead_of_axle_m: 0.015,
             mount_tilt_deg: -3.8,
             accel_noise_lsb: [13.0, 20.0, 18.0],
             gyro_noise_lsb: [8.0, 6.0, 6.0],
@@ -124,8 +139,8 @@ impl ImuParams {
     }
 }
 
-/// Specific force `(forward, up)` in m/s² at a point `height_m` above the
-/// axle (the formula in the module docs).
+/// Specific force `(forward, up)` in m/s² at a point `height_m` above and
+/// `ahead_m` ahead of the axle (the formula in the module docs).
 ///
 /// `pitch_accel_rad_s2` is passed in rather than computed from the physics,
 /// so the robot can also be *held* (e.g. still in a hand during calibration,
@@ -136,10 +151,13 @@ pub fn specific_force(
     pitch_accel_rad_s2: f64,
     axle_accel_m_s2: f64,
     height_m: f64,
+    ahead_m: f64,
 ) -> (f64, f64) {
     let (sin, cos) = state.pitch_rad.sin_cos();
-    let forward = axle_accel_m_s2 * cos + height_m * pitch_accel_rad_s2 - G * sin;
-    let up = axle_accel_m_s2 * sin - height_m * state.pitch_rate_rad_s.powi(2) + G * cos;
+    let rate_sq = state.pitch_rate_rad_s.powi(2);
+    let forward =
+        axle_accel_m_s2 * cos + height_m * pitch_accel_rad_s2 - ahead_m * rate_sq - G * sin;
+    let up = axle_accel_m_s2 * sin - ahead_m * pitch_accel_rad_s2 - height_m * rate_sq + G * cos;
     (forward, up)
 }
 
@@ -176,6 +194,7 @@ impl Imu {
             pitch_accel_rad_s2,
             axle_accel_m_s2,
             p.height_above_axle_m,
+            p.ahead_of_axle_m,
         );
         // Into the chip's frame, pitched forward by the mounting tilt.
         let (sin, cos) = p.mount_tilt_deg.to_radians().sin_cos();
@@ -288,7 +307,7 @@ mod tests {
             pitch_rate_rad_s: 5.0,
             ..State::default()
         };
-        let (forward, up) = specific_force(&state, 0.0, 0.0, 0.1);
+        let (forward, up) = specific_force(&state, 0.0, 0.0, 0.1, 0.0);
         assert!(forward.abs() < 1e-12);
         assert!((up - (G - 2.5)).abs() < 1e-12, "{up}");
     }
@@ -298,8 +317,14 @@ mod tests {
         // The axle point doesn't accelerate, so only gravity is seen.
         let body = Body::prototype();
         let state = State::tilted_deg(10.0);
-        let falling = specific_force(&state, body.pitch_accel(state.pitch_rad, 0.0), 0.0, 0.0);
-        let held = specific_force(&state, 0.0, 0.0, 0.0);
+        let falling = specific_force(
+            &state,
+            body.pitch_accel(state.pitch_rad, 0.0),
+            0.0,
+            0.0,
+            0.0,
+        );
+        let held = specific_force(&state, 0.0, 0.0, 0.0, 0.0);
         assert!((falling.0 - held.0).abs() < 1e-12);
     }
 
@@ -311,8 +336,46 @@ mod tests {
         let body = Body::prototype();
         let h = body.inertia_kg_m2 / (body.mass_kg * body.com_height_m);
         let state = State::tilted_deg(10.0);
-        let (forward, _) = specific_force(&state, body.pitch_accel(state.pitch_rad, 0.0), 0.0, h);
+        let (forward, _) =
+            specific_force(&state, body.pitch_accel(state.pitch_rad, 0.0), 0.0, h, 0.0);
         assert!(forward.abs() < 1e-9, "{forward}");
+    }
+
+    #[test]
+    fn ahead_of_the_axle_spinning_up_pulls_down() {
+        // Not rotating yet, speeding up forward at 10 rad/s², chip 0.1 m ahead
+        // of the axle: it drops at 1 m/s², so up reads g − 1.
+        let (forward, up) = specific_force(&State::default(), 10.0, 0.0, 0.0, 0.1);
+        assert!(forward.abs() < 1e-12, "{forward}");
+        assert!((up - (G - 1.0)).abs() < 1e-12, "{up}");
+    }
+
+    #[test]
+    fn ahead_of_the_axle_rotation_pulls_backward() {
+        // Centripetal towards the axle, which is behind the chip: forward =
+        // −f·ω² = −0.1 · 25.
+        let (forward, up) = specific_force(&rotating(5.0_f64.to_degrees()), 0.0, 0.0, 0.0, 0.1);
+        assert!((forward + 2.5).abs() < 1e-12, "{forward}");
+        assert!((up - G).abs() < 1e-12, "{up}");
+    }
+
+    #[test]
+    fn prototype_accel_pitch_barely_moves_as_a_fall_starts() {
+        // Released at 5°: the chip sits just above the centre of percussion,
+        // so its accel pitch reads within a degree of 0 instead of 5°.
+        let body = Body::prototype();
+        let p = ImuParams::prototype();
+        let state = State::tilted_deg(5.0);
+        let (forward, up) = specific_force(
+            &state,
+            body.pitch_accel(state.pitch_rad, 0.0),
+            0.0,
+            p.height_above_axle_m,
+            p.ahead_of_axle_m,
+        );
+        #[expect(clippy::cast_possible_truncation, reason = "a few m/s², fits f32")]
+        let pitch = accel_pitch_deg(forward as f32, up as f32);
+        assert!(pitch.abs() < 1.0, "{pitch}");
     }
 
     #[test]
