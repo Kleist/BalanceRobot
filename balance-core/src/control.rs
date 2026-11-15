@@ -61,7 +61,9 @@ impl Config {
     /// The prototype as measured so far.
     ///
     /// - gyro ±500 °/s: fast enough for a falling robot.
-    /// - balance point −3.8°: refine once the robot balances. If it keeps
+    /// - balance point +3.8°: the accel pitch with the robot held at its
+    ///   balance point (the chip is mounted slightly tilted). Refine once the
+    ///   robot balances. If it keeps
     ///   rolling forward while holding 0°, it is really leaning forward
     ///   there, so the true balance point is further back: lower this value
     ///   (and vice versa).
@@ -77,7 +79,7 @@ impl Config {
     ///   wheel speed.
     pub const PROTOTYPE: Self = Self {
         gyro_lsb_per_dps: 65.5,
-        balance_pitch_deg: -3.8,
+        balance_pitch_deg: 3.8,
         filter_tau_s: 0.5,
         calibration_samples: 1000,
         calibration_max_spread_dps: 2.0,
@@ -97,34 +99,41 @@ impl Config {
 
 /// Map the IMU's accelerometer X/Y/Z to the robot's `(forward, up)`.
 ///
-/// The board stands upright on the chassis: **+X points up, +Z forward, +Y to
-/// the right** (so the axle is Y). Measured with the robot held still
-/// (1 g = 8192 LSB):
+/// The robot's **front is the closed side of the body**: the side the motors
+/// drive towards for a positive command (checked on the robot, see
+/// `docs/wiring.md`). The board stands upright on the chassis: **+X points up,
+/// +Z backward (towards the open side), +Y to the left** (so the axle is Y).
+/// Measured with the robot held still (1 g = 8192 LSB):
 ///
 /// | Position | ax | ay | az |
 /// |---|---|---|---|
 /// | Upright (balance point) | +8169 | −147 | +540 |
-/// | Tilted forward ~40° | +6011 | −196 | −5469 |
-/// | Tilted backward ~40° | +5950 | −40 | +5711 |
+/// | Tilted forward ~40° (closed side down) | +5950 | −40 | +5711 |
+/// | Tilted backward ~40° (open side down) | +6011 | −196 | −5469 |
 ///
-/// Upright, X reads +1 g, so +X is up. Tipping forward points +Z towards the
-/// ground, so `az` goes negative, which is what [`accel_pitch_deg`] expects
-/// of the forward axis.
+/// Upright, X reads +1 g, so +X is up. Tipping forward points −Z towards the
+/// ground, so `az` goes *positive*: the forward axis is −Z, which makes the
+/// forward reading go negative when tipping forward, as [`accel_pitch_deg`]
+/// expects.
+///
+/// (The first axis check, 2026-11-11, took the open side as the front, so the
+/// IMU and the motors disagreed: tilting forward drove the wheels backward.
+/// Found in the wheels-in-the-air sign check.)
 #[must_use]
 pub fn robot_axes(accel: [i16; 3]) -> (f32, f32) {
-    (f32::from(accel[2]), f32::from(accel[0]))
+    (-f32::from(accel[2]), f32::from(accel[0]))
 }
 
 /// The robot's pitch rate in °/s (positive = tipping forward) from the gyro's
 /// `[x, y, z]` in °/s.
 ///
 /// Pitching rotates the robot about its wheel axle, Y (see [`robot_axes`]).
-/// Tipping forward turns +Z (forward) towards −X (down). By the right-hand
-/// rule a positive rotation about +Y turns +Z towards +X, the other way, so
-/// tipping forward is a *negative* Y rate.
+/// Tipping forward turns −Z (forward) towards −X (down). By the right-hand
+/// rule a positive rotation about +Y turns +Z towards +X, and so −Z towards
+/// −X: tipping forward is a *positive* Y rate.
 #[must_use]
 pub const fn robot_pitch_rate(rates_dps: [f32; 3]) -> f32 {
-    -rates_dps[1]
+    rates_dps[1]
 }
 
 /// What one [`Controller::step`] computed. All angles in degrees relative to
@@ -213,8 +222,8 @@ mod tests {
         )]
         let lsb = |v: f32| libm::roundf(v * 8192.0) as i16;
         RawSample {
-            // Tilted forward: forward (Z) reads −sin, up (X) reads cos.
-            accel: [lsb(libm::cosf(chip_pitch)), 0, lsb(-libm::sinf(chip_pitch))],
+            // Tilted forward: forward (−Z) reads −sin, so Z reads +sin; up (X) reads cos.
+            accel: [lsb(libm::cosf(chip_pitch)), 0, lsb(libm::sinf(chip_pitch))],
             gyro: [0, gyro_y, 0],
         }
     }
@@ -236,7 +245,7 @@ mod tests {
 
     #[test]
     fn upright_chip_maps_to_up() {
-        assert_eq!(robot_axes([8192, 5, -7]), (-7.0, 8192.0));
+        assert_eq!(robot_axes([8192, 5, -7]), (7.0, 8192.0));
     }
 
     #[test]
@@ -250,14 +259,14 @@ mod tests {
     }
 
     #[test]
-    fn bias_is_removed_and_minus_gyro_y_is_tipping_forward() {
-        // Gyro Y reads −131 LSB = −2 °/s, of which −1 °/s is bias: −1 °/s on
+    fn bias_is_removed_and_plus_gyro_y_is_tipping_forward() {
+        // Gyro Y reads +131 LSB = +2 °/s, of which +1 °/s is bias: +1 °/s on
         // Y is tipping forward at 1 °/s.
-        let mut controller = Controller::new(Config::PROTOTYPE, GyroBias([0.0, -1.0, 0.0]));
-        let mut out = controller.step(&sample(0.0, -131), DT);
-        assert_close(out.rates_dps[1], -1.0, 1e-4);
+        let mut controller = Controller::new(Config::PROTOTYPE, GyroBias([0.0, 1.0, 0.0]));
+        let mut out = controller.step(&sample(0.0, 131), DT);
+        assert_close(out.rates_dps[1], 1.0, 1e-4);
         for _ in 0..499 {
-            out = controller.step(&sample(0.0, -131), DT);
+            out = controller.step(&sample(0.0, 131), DT);
         }
         // 1 s at 1 °/s: the gyro pitch went up by 1°; the filter mostly
         // believes the accelerometer (0°) at this slow rate.
@@ -291,7 +300,7 @@ mod tests {
     #[test]
     fn tipping_forward_faster_drives_forward_harder() {
         // Same tilt, but the second time it is tipping forward at 10 °/s
-        // (gyro Y = −655): D adds to the command.
+        // (gyro Y = +655): D adds to the command.
         let run = |gyro_y| {
             let mut controller = with_gains(0.0, 0.0, 0.01);
             let mut out: Option<Output> = None;
@@ -301,6 +310,6 @@ mod tests {
             out.map_or(f32::NAN, |o| o.motor_cmd)
         };
         assert_close(run(0), 0.0, 1e-4);
-        assert!(run(-655) > 0.0);
+        assert!(run(655) > 0.0);
     }
 }

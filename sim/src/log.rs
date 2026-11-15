@@ -125,8 +125,8 @@ mod tests {
 
     use super::{CALIBRATION_SAMPLES, Pipeline, header};
 
-    /// The chip exactly level (1 g on X = up), which is 3.8° forward of the
-    /// balance point.
+    /// The chip exactly level (1 g on X = up), which is 3.8° backward of the
+    /// balance point (+3.8°).
     const UPRIGHT: RawSample = RawSample {
         accel: [8192, 0, 0],
         gyro: [0, 131, 0], // 2 °/s bias on Y
@@ -177,13 +177,13 @@ mod tests {
         let GyroBias([_, by, _]) = pipeline.bias();
         assert!((by - 2.0).abs() < 1e-3, "{by}");
         let row = pipeline.row(2000, &UPRIGHT, [-12, 34]);
-        // Pitch 3.8: level is 3.8° forward of the balance point (−3.8°).
-        // motor_cmd 0.456 = kp 0.12 × 3.8° (no I or D yet in the first step).
+        // Pitch −3.8: level is 3.8° backward of the balance point (+3.8°).
+        // motor_cmd −0.456 = kp 0.12 × −3.8° (no I or D yet in the first step).
         assert_eq!(
             fields(&row),
             [
-                "2000", "8192", "0", "0", "0", "131", "0", "3.8", "0.00", "0.00", "0.00", "3.8",
-                "3.8", "0.456", "-12", "34"
+                "2000", "8192", "0", "0", "0", "131", "0", "-3.8", "0.00", "0.00", "0.00", "-3.8",
+                "-3.8", "-0.456", "-12", "34"
             ]
         );
     }
@@ -209,17 +209,17 @@ mod tests {
 
     #[test]
     fn a_gyro_rate_integrates_into_gyro_pitch() {
-        // Tipping forward at 10 °/s (−655 LSB on Y, on top of the 2 °/s bias)
-        // for 100 samples of 2 ms = 2°, starting from 3.8°.
+        // Tipping forward at 10 °/s (+655 LSB on Y, on top of the 2 °/s bias)
+        // for 100 samples of 2 ms = 2°, starting from −3.8°.
         let mut pipeline = calibrated();
         let turning = RawSample {
-            gyro: [0, 131 - 655, 0],
+            gyro: [0, 131 + 655, 0],
             ..UPRIGHT
         };
         let mut row = String::new();
         for i in 0..100 {
             row = pipeline.row(i * 2000, &turning, [0, 0]);
         }
-        assert_eq!(fields(&row)[11], "5.8");
+        assert_eq!(fields(&row)[11], "-1.8");
     }
 }
