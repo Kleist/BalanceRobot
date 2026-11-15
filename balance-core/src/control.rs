@@ -69,8 +69,12 @@ impl Config {
     /// - calibration 1000 samples (2 s at 500 Hz), spread ≤ 2 °/s: the gyro's
     ///   noise at rest is about 0.5 °/s peak to peak; moving the robot gives
     ///   tens of °/s.
-    /// - gains 0: not tuned yet, so the command is always 0. The closed-loop
-    ///   simulation step finds real values.
+    /// - gains kp 0.12, ki 2.0, kd 0.008: tuned in simulation (`sim` crate,
+    ///   `tune` example) with an *ideal* motor, i.e. no deadband or backlash.
+    ///   Not tried on the robot yet. The I term is essential: with motors
+    ///   that behave like speed sources (DC motors do), P or PD alone can't
+    ///   balance, because ∫pitch is what tells the controller about the
+    ///   wheel speed.
     pub const PROTOTYPE: Self = Self {
         gyro_lsb_per_dps: 65.5,
         balance_pitch_deg: -3.8,
@@ -78,9 +82,9 @@ impl Config {
         calibration_samples: 1000,
         calibration_max_spread_dps: 2.0,
         gains: Gains {
-            kp: 0.0,
-            ki: 0.0,
-            kd: 0.0,
+            kp: 0.12,
+            ki: 2.0,
+            kd: 0.008,
         },
     };
 
@@ -265,8 +269,8 @@ mod tests {
     }
 
     #[test]
-    fn prototype_gains_give_no_command() {
-        let out = Controller::new(Config::PROTOTYPE, GyroBias([0.0; 3])).step(&sample(10.0, 0), DT);
+    fn zero_gains_give_no_command() {
+        let out = with_gains(0.0, 0.0, 0.0).step(&sample(10.0, 0), DT);
         assert_close(out.motor_cmd, 0.0, 0.0);
     }
 
