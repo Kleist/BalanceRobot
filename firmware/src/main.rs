@@ -22,7 +22,9 @@
 //! Each sample then goes through `balance_core::control::Controller` (the same code the
 //! simulator runs), which computes the pitch estimates and a motor command. With
 //! `CONTROL_ENABLED` the command drives both motors (while the safety cut-offs allow it
-//! and no motor test or direction check runs); otherwise the motors stay off.
+//! and no motor test or direction check runs), through the deadband compensation and
+//! battery scaling of `balance_core::drive`; otherwise the motors stay off. While the
+//! motors are off the PID is held reset, so it starts from scratch when they come on.
 //!
 //! Runs on two Embassy executors sharing the one CPU core:
 //! - the normal (thread-mode) executor runs `main` (setup and calibration), then the `blink`
@@ -57,6 +59,7 @@
 use balance_core::{
     battery::Divider,
     control::{Config, Controller, Gains, Output as ControlOutput},
+    drive::Drive,
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
     safety::{Limits, Safety, Status},
@@ -108,9 +111,12 @@ const GYRO_ODR: GyroOdr = GyroOdr::Hz1600;
 const SAMPLE_PERIOD: Duration = Duration::from_micros(2000);
 /// `SAMPLE_PERIOD` in seconds, for integrating the gyro rate.
 const DT_S: f32 = 0.002;
-/// Log one CSV line per this many samples: 50 = 10 lines/s. Set to 1 to log every sample
-/// (500 lines/s; probably more than the USB log keeps up with).
-const LOG_EVERY_N_SAMPLES: u32 = 50;
+/// Log one CSV line per this many samples: 10 = 50 lines/s, enough to follow a fall
+/// (τ ≈ 0.125 s) and a ~2.5 Hz wobble when comparing with the simulation (bring-up step
+/// C4). Each line takes the log task ~2 ms to format and send, so 50 lines/s keep it busy
+/// ~10 % of the time; check that `dropped` in the `# loop max` lines stays 0. Set to 1 to
+/// log every sample (500 lines/s; more than the USB log keeps up with).
+const LOG_EVERY_N_SAMPLES: u32 = 10;
 /// Log the loop's busy time once per this many samples: 500 = once a second.
 const LOOP_STATS_EVERY_N_SAMPLES: u32 = 500;
 /// Battery sense divider: battery + → 100 kΩ → GPIO4 → 33 kΩ → GND.
@@ -171,8 +177,9 @@ const MOTOR_CHECK_CMD: f32 = 0.5;
 const MOTOR_CHECK_STEP_MS: u64 = 2000;
 
 /// Apply the controller's command to both motors. Off by default, so flashing for any
-/// other reason never drives the wheels by surprise: set it to `true` on purpose, with
-/// the wheels in the air for the sign check. Ignored while `MOTOR_TEST_ENABLED` or
+/// other reason never drives the wheels by surprise: set it to `true` on purpose, for the
+/// sign check (wheels in the air, `SIGN_CHECK_GAINS`) or a balance attempt (on the floor,
+/// hand ready). Ignored while `MOTOR_TEST_ENABLED` or
 /// `MOTOR_CHECK_ENABLED` is set (those own the motors then).
 const CONTROL_ENABLED: bool = false;
 
@@ -188,9 +195,17 @@ const SIGN_CHECK_GAINS: Gains = Gains {
     kd: 0.0,
 };
 
-/// The gains the controller runs with. The first balance attempt (bring-up step C3)
-/// switches this to `Config::PROTOTYPE.gains`, the gains tuned in simulation.
-const CONTROL_GAINS: Gains = SIGN_CHECK_GAINS;
+/// Which gains the controller runs with. `true`: `Config::PROTOTYPE.gains` (kp 0.12,
+/// ki 2.0, kd 0.008), tuned in simulation, for a balance attempt on the floor (bring-up
+/// step C3). `false`: `SIGN_CHECK_GAINS`, for the sign check with the wheels in the air;
+/// don't use the balance gains for that: held tilted, their I term winds up to full
+/// command within a second and the wheels race.
+const BALANCE_GAINS: bool = true;
+const CONTROL_GAINS: Gains = if BALANCE_GAINS {
+    Config::PROTOTYPE.gains
+} else {
+    SIGN_CHECK_GAINS
+};
 
 /// The direction check's command for both motors, by time since the start of the check.
 /// 0 while the safety cut-offs don't allow the motors to run.
@@ -743,8 +758,14 @@ fn apply_test_step(
 
 /// Drives both motors with the controller's command, if `CONTROL_ENABLED` and no motor
 /// test or direction check owns the motors; stopped while the safety cut-offs say no.
+///
+/// The command goes through `Drive::PROTOTYPE` first (bring-up steps B2/B3, the same code
+/// the simulator tests): deadband compensation maps it onto the duty range where a turning
+/// wheel actually moves (8 %..100 %), and battery scaling (× 7.4 V / battery) gives the
+/// same wheel speed per command on a full and a nearly empty pack.
 fn apply_control(
     cmd: f32,
+    battery_v: f32,
     motors_allowed: bool,
     left: &mut Motor<'_>,
     right: &mut Motor<'_>,
@@ -752,8 +773,12 @@ fn apply_control(
     if !CONTROL_ENABLED || MOTOR_TEST_ENABLED || MOTOR_CHECK_ENABLED {
         return Ok(());
     }
-    let cmd = if motors_allowed { cmd } else { 0.0 };
-    left.set(cmd).and(right.set(cmd))
+    let duty = if motors_allowed {
+        Drive::PROTOTYPE.duty(cmd, battery_v)
+    } else {
+        0.0
+    };
+    left.set(duty).and(right.set(duty))
 }
 
 /// Sets up PWM on the L298N enable pins and returns the `(left, right)` motors, stopped.
@@ -923,8 +948,15 @@ async fn control_loop(parts: ControlParts) {
                 // Apply the command after the safety check of this very sample, so a
                 // tripped cut-off stops the motors in the same iteration.
                 let allowed = safety.status().motors_allowed();
-                if let Err(e) = apply_control(out.motor_cmd, allowed, &mut left, &mut right) {
+                if let Err(e) =
+                    apply_control(out.motor_cmd, battery_v, allowed, &mut left, &mut right)
+                {
                     log(&mut times, LogMsg::MotorError(e));
+                }
+                // While the motors are off nothing corrects the pitch, so the I term would
+                // wind up and the motors would start at full power once allowed again.
+                if !allowed {
+                    controller.reset_pid();
                 }
                 if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {

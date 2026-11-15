@@ -178,6 +178,17 @@ impl Controller {
         }
     }
 
+    /// Forgets the PID's I term and D history; the pitch estimates keep
+    /// running.
+    ///
+    /// Call it while the motors are off (fallen, held, cut off): the pitch
+    /// isn't 0 then and nothing corrects it, so the I term would wind up to
+    /// full command within seconds (ki 2.0 at 2° reaches 1.0 in 0.25 s), and
+    /// the motors would start at full power the moment they are allowed again.
+    pub fn reset_pid(&mut self) {
+        self.pid.reset();
+    }
+
     /// Processes one IMU sample taken `dt_s` after the previous one.
     pub fn step(&mut self, raw: &RawSample, dt_s: f32) -> Output {
         let (forward, up) = robot_axes(raw.accel);
@@ -241,6 +252,27 @@ mod tests {
             (actual - expected).abs() <= tol,
             "{actual} is not within {tol} of {expected}"
         );
+    }
+
+    #[test]
+    fn reset_pid_forgets_the_wound_up_i_term() {
+        // I only: held at 2° for 2 s, the I term winds up to (nearly) full
+        // command; anti-windup stops it one step short of the 1.0 limit.
+        let mut controller = with_gains(0.0, 2.0, 0.0);
+        let mut out = controller.step(&sample(2.0, 0), DT);
+        for _ in 0..1000 {
+            out = controller.step(&sample(2.0, 0), DT);
+        }
+        assert!(out.motor_cmd > 0.98, "{out:?}");
+        // After a reset the first step outputs 0 (no history yet), then the
+        // I term builds up again from scratch: ki · pitch · dt per step.
+        controller.reset_pid();
+        out = controller.step(&sample(2.0, 0), DT);
+        assert_close(out.motor_cmd, 0.0, 1e-6);
+        out = controller.step(&sample(2.0, 0), DT);
+        assert_close(out.motor_cmd, 2.0 * 2.0 * DT, 1e-3);
+        // The pitch estimate is not reset.
+        assert_close(out.filter_pitch_deg, 2.0, 0.01);
     }
 
     #[test]
