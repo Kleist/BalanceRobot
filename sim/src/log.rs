@@ -28,7 +28,7 @@ pub fn header(bias: GyroBias) -> String {
     format!(
         "# gyro bias (deg/s): x={bx:.3} y={by:.3} z={bz:.3}\n\
          # ICM-42670-P raw samples; accel G4 = 8192 LSB/g, gyro Deg500 = 65.5 LSB/(deg/s)\n\
-         {:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16}",
+         {:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6}",
         "t_us",
         "ax",
         "ay",
@@ -41,7 +41,10 @@ pub fn header(bias: GyroBias) -> String {
         "gy_dps",
         "gz_dps",
         "gyro_pitch_deg",
-        "filter_pitch_deg"
+        "filter_pitch_deg",
+        "motor_cmd",
+        "duty_l",
+        "duty_r"
     )
 }
 
@@ -97,15 +100,18 @@ impl Pipeline {
     }
 
     /// Processes one sample taken at `t_us` and returns its CSV line (without
-    /// a newline), formatted like the firmware's.
-    pub fn row(&mut self, t_us: u64, raw: &RawSample) -> String {
+    /// a newline), formatted like the firmware's. `duty_pct` is the duty
+    /// applied to the `[left, right]` motor in signed percent (the firmware
+    /// logs what it actually sent, which can differ from the command).
+    pub fn row(&mut self, t_us: u64, raw: &RawSample, duty_pct: [i8; 2]) -> String {
         let out = self.controller.step(raw, DT_S);
         let [ax, ay, az] = raw.accel;
         let [gx, gy, gz] = raw.gyro;
         let [rx, ry, rz] = out.rates_dps;
+        let [duty_l, duty_r] = duty_pct;
         format!(
-            "{t_us:>10},{ax:>6},{ay:>6},{az:>6},{gx:>6},{gy:>6},{gz:>6},{:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{:>16.1}",
-            out.accel_pitch_deg, out.gyro_pitch_deg, out.filter_pitch_deg
+            "{t_us:>10},{ax:>6},{ay:>6},{az:>6},{gx:>6},{gy:>6},{gz:>6},{:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{:>16.1},{:>9.3},{duty_l:>6},{duty_r:>6}",
+            out.accel_pitch_deg, out.gyro_pitch_deg, out.filter_pitch_deg, out.motor_cmd
         )
     }
 }
@@ -155,11 +161,14 @@ mod tests {
                 "gy_dps",
                 "gz_dps",
                 "gyro_pitch_deg",
-                "filter_pitch_deg"
+                "filter_pitch_deg",
+                "motor_cmd",
+                "duty_l",
+                "duty_r"
             ]
         );
         // Fixed-width columns: the header lines up with the rows.
-        assert_eq!(lines[2].len(), calibrated().row(0, &UPRIGHT).len());
+        assert_eq!(lines[2].len(), calibrated().row(0, &UPRIGHT, [0, 0]).len());
     }
 
     #[test]
@@ -167,13 +176,14 @@ mod tests {
         let mut pipeline = calibrated();
         let GyroBias([_, by, _]) = pipeline.bias();
         assert!((by - 2.0).abs() < 1e-3, "{by}");
-        let row = pipeline.row(2000, &UPRIGHT);
+        let row = pipeline.row(2000, &UPRIGHT, [-12, 34]);
         // Pitch 3.8: level is 3.8° forward of the balance point (−3.8°).
+        // motor_cmd 0.456 = kp 0.12 × 3.8° (no I or D yet in the first step).
         assert_eq!(
             fields(&row),
             [
                 "2000", "8192", "0", "0", "0", "131", "0", "3.8", "0.00", "0.00", "0.00", "3.8",
-                "3.8"
+                "3.8", "0.456", "-12", "34"
             ]
         );
     }
@@ -208,7 +218,7 @@ mod tests {
         };
         let mut row = String::new();
         for i in 0..100 {
-            row = pipeline.row(i * 2000, &turning);
+            row = pipeline.row(i * 2000, &turning, [0, 0]);
         }
         assert_eq!(fields(&row)[11], "5.8");
     }
