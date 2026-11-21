@@ -74,9 +74,11 @@ impl Config {
     /// The prototype as measured so far.
     ///
     /// - gyro ±500 °/s: fast enough for a falling robot.
-    /// - balance point +3.8°: the accel pitch with the robot held at its
-    ///   balance point (the chip is mounted slightly tilted). Refine once the
-    ///   robot balances. If it keeps
+    /// - balance point −4.2°: the accel pitch with the robot held still at its
+    ///   balance point (2026-11-22: filter pitch −8.0 ± 0.1° with the old
+    ///   +3.8°). The first hand measurement (2026-11-11, raw az +540 → +3.8°
+    ///   after the axes fix) was 8° off; with it every balance attempt ran
+    ///   away forward. If it keeps
     ///   rolling forward while holding 0°, it is really leaning forward
     ///   there, so the true balance point is further back: lower this value
     ///   (and vice versa).
@@ -98,7 +100,7 @@ impl Config {
     /// - speed estimate τ 50 ms: the motor model's lag (estimated).
     pub const PROTOTYPE: Self = Self {
         gyro_lsb_per_dps: 65.5,
-        balance_pitch_deg: 3.8,
+        balance_pitch_deg: -4.2,
         filter_tau_s: 0.5,
         calibration_samples: 1000,
         calibration_max_spread_dps: 2.0,

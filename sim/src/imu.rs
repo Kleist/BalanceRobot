@@ -112,8 +112,9 @@ impl ImuParams {
     /// The rest is from a 60 s log of the robot lying still (`log_stats`
     /// example):
     ///
-    /// - mount tilt +3.8°: the accel pitch with the robot held at its balance
-    ///   point (the firmware's `BALANCE_PITCH_DEG`). Whether that is the board
+    /// - mount tilt −4.2°: the accel pitch with the robot held at its balance
+    ///   point (`Config::PROTOTYPE.balance_pitch_deg`, re-measured 2026-11-22;
+    ///   was +3.8°). Whether that is the board
     ///   sitting crooked or an accelerometer offset can't be told apart from
     ///   one position; the model puts it all in the tilt.
     /// - noise: the per-sample standard deviation of each axis. It is white:
@@ -132,7 +133,7 @@ impl ImuParams {
         Self {
             height_above_axle_m: 0.127,
             ahead_of_axle_m: -0.015,
-            mount_tilt_deg: 3.8,
+            mount_tilt_deg: -4.2,
             accel_noise_lsb: [13.0, 20.0, 18.0],
             gyro_noise_lsb: [8.0, 6.0, 6.0],
             accel_bias_lsb: [0.0; 3],
