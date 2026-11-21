@@ -1,6 +1,6 @@
 # BalanceRobot
 
-Two-wheel self-balancing robot. Firmware in Rust (no_std) on ESP32-C3, later controlled from an Android phone over BLE.
+Two-wheel self-balancing robot. Firmware in Rust (no_std) on ESP32-C3, later controlled from a hand-held **BBC micro:bit v2** tilt remote over BLE (also Rust, Embassy).
 
 ## How we work (learning project)
 
@@ -29,6 +29,7 @@ This repo starts by reviving an **old prototype chassis** as a test bed. Code de
 | Motor driver | L298N dual H-bridge module, onboard 5V regulator enabled (CON5 jumper fitted). ENA/ENB jumpers removed (enable pins wired out for PWM) |
 | Motors | 2x yellow "TT" gear motors, 65 mm wheels, **no encoders** |
 | Battery | 2x 18650 in series (2S, 6.4-8.4 V), feeds L298N motor supply |
+| Remote | **BBC micro:bit v2** (nRF52833, BLE 5): LSM303AGR accelerometer/magnetometer on the internal I2C, 5x5 LED matrix, buttons A/B, onboard USB debug probe (CMSIS-DAP: flashing and defmt/RTT logging via `probe-rs`). Powered by USB or 2xAAA. Tilt forward/back = speed, left/right = turn |
 | Body (measured 2026-11-11) | 350 g total, centre of mass 8 cm above the axle, swings with T = 0.70 s hanging upside down -> I ~ 0.0034 kg m^2 about the axle. On its wheels with the axle held still by the motors, fall time constant tau = sqrt((I + m d r)/(m g d)) ~ 0.125 s (1 deg -> 10 deg in ~0.375 s); T/2pi ~ 0.11 s is the fixed-pivot value. Wheels can't be weighed separately; wheel + reflected motor spin inertia estimated at 3e-4 kg m^2 (not measured) |
 
 ## Board I2C bus (fixed by board design)
@@ -70,6 +71,7 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 - `balance-core/` - all logic that doesn't touch hardware (filters, PID, motor mapping, battery math). Command → duty in `drive` (`Drive::PROTOTYPE`: deadband compensation `duty = sign·(stop + |cmd|·(1 − stop))`, stop 8 %, dead zone 0.005, then battery scaling `× 7.4 V / v_battery`, clamped). `#![no_std]`, no hardware deps, unit-tested on the host. Put as much code here as possible.
 - `sim/` - host-only (`std`) simulation of the robot, in the root workspace, depends on `balance-core`. So far: body physics (`sim::pendulum`, inverted pendulum on driven wheels with the axle acceleration as input, incl. the motors' reaction torque on the body), IMU model (`sim::imu`: specific force at the chip incl. tangential/centripetal terms, mounting tilt, bias, per-axis Gaussian noise, quantisation to LSB, real axes +X up / +Z backward; `ImuParams::prototype()` measured: chip 12.7 cm above / 1.5 cm behind the axle, noise and gyro bias from a still log), the firmware's log pipeline + CSV format (`sim::log`, runs the same `balance_core::control::Controller` as the firmware), a first-order DC motor (`sim::motor`: command sets a wheel speed, v_max 0.41 m/s measured, lag 50 ms estimated; `Motor::prototype()` adds the 100 Hz PWM deadband with hysteresis (`Deadband::PROTOTYPE`: start 19 %, stop 8 %, averaged over both motors; a wheel slower than 5 mm/s counts as standing), `Motor::ideal()` is linear; `at_battery(v)` scales the duty by v / 7.4 V, the reference voltage at which speed and deadband hold) and the closed loop (`sim::closed_loop::Sim`: 0.1 ms physics, 500 Hz controller, 1 ms command latency; `with_drive(Drive)` puts `balance_core::drive` between controller and motor). Examples: `fall` (pitch table), `imu_log [fall]` (simulated firmware log), `log_stats < file.log` (mean/std of the raw columns of a real or simulated log), `balance [--ideal] [KP KI KD [START_DEG]]` (closed-loop trace, deadband motor unless `--ideal`), `tune` (grid search for kp/ki/kd/kv on the deadband motor + `Drive::PROTOTYPE`, must survive motor lag 15-50 ms with up to 20 ms dead time and a ±1° balance-point error; `tune -- --check KP KI KD KV` stress-tests one set on 82 harder runs; `--release`), `drive` (no compensation vs. compensation vs. battery scaling at 6.4-8.4 V, 20 runs each; `--release`), `compare [OPTIONS] [LOG] < robot.log` (reads a robot log, splits it into attempts from `# safety: motors on` to `motors off` via `sim::robot_log`, simulates each from the same start pitch and battery voltage with `Drive::PROTOTYPE`, prints both traces side by side and a summary: time to fall, RMS/max pitch, oscillation period from zero crossings, mean |cmd|, % saturated; `--kv`, `--offset-deg` (balance-point error), `--vmax`, `--lag-ms`, `--start-duty`, `--stop-duty`, `--ideal`, `--gains` to fit the model; `--synthetic START_DEG` checks the tool on a simulated log; `--release`).
 - `firmware/` - thin hardware glue for the ESP32-C3, a separate cargo workspace because it only builds for the RISC-V target (its `.cargo/config.toml` sets the target, linker script and `espflash` runner). `cd firmware && cargo run --release` builds, flashes and opens the log monitor; flashing needs the user in the `dialout` group.
+- `remote/` (from step E1) - micro:bit v2 firmware, its own cargo workspace like `firmware/` (target `thumbv7em-none-eabihf`, `probe-rs run --chip nRF52833_xxAA` runner, `defmt` + RTT logging). `cd remote && cargo run --release` flashes and shows the log; needs `cargo install probe-rs-tools` and the probe-rs udev rule. Keeps the same lint block. Shared logic (tilt → command, packet format) lives in `balance-core`, so `balance-core` must also build for `thumbv7em-none-eabihf`.
 - Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests), mirrored in `firmware/Cargo.toml`; keep the two in sync. CI treats warnings as errors.
 - Toolchain is pinned in `rust-toolchain.toml`.
 - Coverage is **reported, not enforced**: CI posts a PR comment comparing base vs PR. Decide per PR whether a drop is acceptable.
@@ -88,6 +90,13 @@ cd firmware
 cargo fmt --check
 cargo clippy --release -- -D warnings
 cargo build --release
+
+# from step E1 (micro:bit remote):
+cargo build -p balance-core --target thumbv7em-none-eabihf
+cd remote
+cargo fmt --check
+cargo clippy --release -- -D warnings
+cargo build --release
 ```
 
 ## Software stack
@@ -98,7 +107,8 @@ cargo build --release
 - IMU log format (firmware -> serial): `#` comment/header lines, then CSV `t_us,ax,ay,az,gx,gy,gz,pitch_deg,gx_dps,gy_dps,gz_dps,gyro_pitch_deg,filter_pitch_deg,motor_cmd,duty_l,duty_r,speed_est`, each column right-aligned to a fixed width with spaces: raw LSB, then the accelerometer-only pitch in degrees (positive = tilted forward), then the bias-corrected gyro rates in °/s, then the pitch from integrating the gyro alone (starts at the accel pitch, drifts), then the complementary-filter pitch, then the controller's motor command (−1..1, positive = forward), then the duty actually applied to the left / right motor in signed percent (what `Motor` last sent: 0 while the command isn't applied; the motor check/test sequences show up here too), then the controller's wheel-speed estimate (fraction of full speed, see Control pipeline). New columns go at the end, so existing column indices stay valid. Sampled at 500 Hz, logged at 50 lines/s (`LOG_EVERY_N_SAMPLES` 10, for comparing with the simulation); `# loop max us: busy N of 2000, late ..., imu ..., battery adc ..., log send ...; dropped N` once a second (longest time per part since the last such line; `late` = how long after its scheduled time an iteration started). The sample loop doesn't print: it queues raw numbers (`LogMsg`) for the `log_writer` task, which formats them and writes via the async USB-Serial-JTAG driver; `println!` only before the loop and in `halt`. Before the CSV header, the startup gyro calibration logs `# gyro bias (deg/s): ...` (it retries while the robot is moving); accel ±4 g = 8192 LSB/g, gyro ±500 °/s = 65.5 LSB/(°/s)
 - Control pipeline: `balance_core::control::Controller` (settings in `Config::PROTOTYPE`: IMU axes, balance point, filter τ, calibration limits, PID gains kp 0.09 / ki 0.5 / kd 0.003 per degree and speed feedback kv 6, see D2; speed estimate = the command through a 50 ms lag, `speed_tau_s`). Sign convention: pitch and motor command positive = forward; positive gains mean "tilted forward -> drive forward". The I term is essential: DC motors act like speed sources, and then tilt-only P or PD is unstable for any gains (one slow pole always stays unstable: the robot runs away until the motors saturate); ∫pitch carries the wheel-speed information that stabilises it
 - The onboard IMU interrupt is probably not broken out: drive the control loop from an Embassy ticker at ~500 Hz and poll the IMU
-- BLE later. **ESP32-C3 is BLE only (no Classic BT / SPP)**, so the Android app must use GATT
+- BLE (planned, group E). **ESP32-C3 is BLE only (no Classic BT / SPP)**, so GATT. Robot = **peripheral** (advertises a custom GATT service with one write-without-response characteristic; testable from a phone with nRF Connect), micro:bit = **central** (scans for the service UUID, connects, writes ~20-50 packets/s). Host stack **TrouBLE** (`trouble-host`) on both sides: on the ESP32-C3 over `esp-radio`'s BLE controller (needs a heap, `esp-alloc`; its interrupts may cost the control loop time: measure `late`/`busy`), on the micro:bit over `embassy-nrf` + `nrf-sdc` (Nordic SoftDevice Controller, has the central role) with `microbit-bsp` for LEDs, buttons and the LSM303AGR. Pin versions that agree on `bt-hci` / `embassy-*` in the step that adds them
+- Remote packet (`balance_core::link`, shared by both sides): `version u8, seq u8, speed i8, turn i8, flags u8` (arm, stop). Robot side: link watchdog (no valid packet for ~250 ms or disconnected → speed and turn targets 0, **not** motors off, which would make a balancing robot fall); the stop flag (button B) cuts the motors via `Safety` as a kill switch; targets rate-limited. Speed target enters the controller through the speed feedback: P and I act on `pitch + kv·(speed_est − target_speed)`, so the robot settles at the target speed; turn is differential (`left = cmd + turn`, `right = cmd − turn`)
 
 ## Bring-up plan
 
@@ -165,8 +175,21 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 - [ ] Re-arm only when the robot is held still: the safety cut-off re-arms within 5° even while it is swung upright at 100-200 °/s, so every attempt starts saturated. Also require |pitch rate| < ~20 °/s (for ~0.2 s)
 - [ ] Position hold: also feed back the integrated speed estimate (lean against the distance travelled), if the steady drift is too much; tried in simulation first
 - [ ] Battery under load: check sag and brownouts while balancing; add bulk capacitance if needed (see "Power notes")
-- [ ] BLE: advertise and show up on the phone
-- [ ] BLE GATT control (steering / setpoint) from Android
+
+**E. micro:bit remote over BLE (in parallel with C/D; only E12 needs a balancing robot)**
+
+- [ ] Remote skeleton: `remote/` crate (own workspace, `thumbv7em-none-eabihf`), `probe-rs`, "hello" over defmt/RTT; CI builds it. Check: `cd remote && cargo run --release` prints hello
+- [ ] Embassy on the micro:bit: blink one LED of the matrix from a task, log button A/B presses. Check: LED blinks, presses show in the log
+- [ ] Raw accelerometer: LSM303AGR over the internal I2C, log mg at ~50 Hz; tilt it to find the axes (like the robot's axes step) and record them in the hardware table
+- [ ] Tilt → command math in `balance-core` (`remote`: pitch/roll from the accel, dead zone ~5°, full scale ~30°, clamp, light low-pass), unit tested; the micro:bit shows the command as a dot on the 5x5 matrix. Check: the dot follows the tilt and is centred when flat
+- [ ] Packet format in `balance-core` (`link`: encode/decode, version, seq, flags), unit tested; `thumbv7em` no_std build in CI
+- [ ] Robot advertises (`esp-radio` + `trouble-host`, heap added): visible in nRF Connect on a phone. Check `# loop max us` with the radio on: are `late` / `busy` still fine at 500 Hz?
+- [ ] Robot GATT service: write characteristic, decode packets, log `# remote: ...`; link watchdog in `balance_core::link`, unit tested. Check: write bytes from nRF Connect and see them logged; stop writing and see the timeout
+- [ ] micro:bit as central: scan for the robot's service UUID, connect, write a fixed packet once a second; LEDs show scanning / connected. Check: the robot logs the packets; the remote reconnects after a robot reset
+- [ ] Live tilt commands at 20-50 Hz, buttons = arm / stop flags; the robot logs them (not applied yet) and packets per second. Check: rate and gaps in the log; range (walk away until it drops)
+- [ ] Steering, wheels in the air: differential turn in `balance_core::drive` (`left = cmd + turn`, `right = cmd − turn`, clamped), unit tested; the robot applies `turn` and the stop flag. Check: tilting the micro:bit left spins the wheels opposite ways; button B cuts the motors (`# safety: ...`)
+- [ ] Speed setpoint, simulation first: target speed in `Controller` (P/I on `pitch + kv·(speed_est − target)`, rate-limited); sim example stepping the target 0 → 0.2 → 0. Check in sim: stays up and follows the target
+- [ ] Drive it (needs D2 done, i.e. the robot balances): apply the speed target on the robot. Check: tilt forward and it rolls forward, level the remote and it stops; on link loss it stops but stays up
 
 ## Known limitations of the prototype
 
