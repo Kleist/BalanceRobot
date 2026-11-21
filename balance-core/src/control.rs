@@ -44,6 +44,17 @@ pub struct Gains {
     /// more command), stable only while `kp · kv < 1` (0.54 in
     /// [`Config::PROTOTYPE`]).
     pub kv: f32,
+    /// Position feedback: degrees of pitch per unit of estimated distance
+    /// travelled since the motors came on (in "full-speed seconds": the
+    /// integral of the speed estimate, so 1 unit ≈ 0.41 m on the prototype).
+    /// P and I act on `pitch + kv · speed + kx · position`. 0 = off.
+    ///
+    /// Why it holds the position: the I term only settles once its input is
+    /// 0 on average. Without `kx`, a balance-point error ε then needs
+    /// `kv · speed = −ε`: a steady drift. With `kx`, standing still at
+    /// `position = −ε / kx` also satisfies it, so the robot stops a short way
+    /// from where it was let go instead of rolling on.
+    pub kx: f32,
 }
 
 /// Everything robot-specific the controller needs.
@@ -68,6 +79,12 @@ pub struct Config {
     /// Time constant in s of the wheel-speed estimate: how fast the wheels
     /// follow the command (the motor's lag).
     pub speed_tau_s: f32,
+    /// Largest lean in degrees the position feedback may ask for (|kx ·
+    /// position| is clamped to this, and the position estimate stops growing
+    /// there). After a big push, or when the estimate has drifted from the
+    /// real position, the robot then leans back by at most this much
+    /// instead of an angle it can't hold.
+    pub max_position_lean_deg: f32,
 }
 
 impl Config {
@@ -97,6 +114,15 @@ impl Config {
     ///   with up to 30 ms dead time, ±30 % speed, 6.6 V), drifting at most
     ///   ~0.1 m/s with a 1° error; so do all its neighbours (kp 0.07-0.11,
     ///   ki 0.35-0.75, kd 0.002-0.004, kv 5-7). kd 0.005 already fails.
+    /// - position feedback kx 4 (D2, position hold): with a 1° balance error
+    ///   the simulated robot stops ~0.1 m from the start instead of drifting
+    ///   ~7 cm/s (1.4 m in 20 s); `tune --check 0.09 0.5 0.003 6 4`: no falls
+    ///   in 82 stress runs, worst 0.17 m from the start (mean 0.11; kx 0:
+    ///   1.04 m), but the robot rocks around its spot (worst pitch over the
+    ///   last 5 s ~1.7° on average instead of 0.3°). kx 6-8 hold tighter
+    ///   (0.10-0.13 m) but more neighbouring gain sets fall; with kx 4 only
+    ///   ki ±30 % do (1 of 82 runs each).
+    /// - position lean clamped to 3° (`max_position_lean_deg`).
     /// - speed estimate τ 50 ms: the motor model's lag (estimated).
     pub const PROTOTYPE: Self = Self {
         gyro_lsb_per_dps: 65.5,
@@ -109,8 +135,10 @@ impl Config {
             ki: 0.5,
             kd: 0.003,
             kv: 6.0,
+            kx: 4.0,
         },
         speed_tau_s: 0.05,
+        max_position_lean_deg: 3.0,
     };
 
     /// Raw gyro LSB `[x, y, z]` to °/s (bias not removed).
@@ -177,6 +205,10 @@ pub struct Output {
     /// Estimated wheel speed as a fraction of full speed, positive =
     /// forward: the command through a first-order lag (no encoders).
     pub speed_est: f32,
+    /// Estimated distance travelled since the motors came on, in full-speed
+    /// seconds (the integral of `speed_est`; clamped, see
+    /// [`Config::max_position_lean_deg`]).
+    pub pos_est: f32,
 }
 
 /// The controller's state between steps.
@@ -188,6 +220,7 @@ pub struct Controller {
     filter: ComplementaryFilter,
     pid: Pid,
     speed_est: f32,
+    pos_est: f32,
 }
 
 impl Controller {
@@ -203,12 +236,14 @@ impl Controller {
             filter: ComplementaryFilter::new(config.filter_tau_s),
             pid: Pid::new(kp, ki, kd, -1.0, 1.0),
             speed_est: 0.0,
+            pos_est: 0.0,
         }
     }
 
-    /// Forgets the PID's I term and D history and sets the speed estimate to
-    /// 0 (the wheels stand while the motors are off); the pitch estimates
-    /// keep running.
+    /// Forgets the PID's I term and D history and sets the speed and position
+    /// estimates to 0 (the wheels stand while the motors are off, and the
+    /// position is held relative to where the robot is let go); the pitch
+    /// estimates keep running.
     ///
     /// Call it while the motors are off (fallen, held, cut off): the pitch
     /// isn't 0 then and nothing corrects it, so the I term would wind up to
@@ -217,6 +252,7 @@ impl Controller {
     pub fn reset_pid(&mut self) {
         self.pid.reset();
         self.speed_est = 0.0;
+        self.pos_est = 0.0;
     }
 
     /// Processes one IMU sample taken `dt_s` after the previous one.
@@ -242,13 +278,27 @@ impl Controller {
         // balance point off by a quarter degree, a sloped floor) makes it add
         // speed until the motors saturate and the robot falls. With it, an
         // offset only gives a steady drift.
-        let setpoint = -self.config.gains.kv * self.speed_est;
+        //
+        // Position feedback adds kx · position: the I term can then settle
+        // with the robot standing still (see `Gains::kx`).
+        let Gains { kv, kx, .. } = self.config.gains;
+        let max_lean = self.config.max_position_lean_deg;
+        let position_lean = (kx * self.pos_est).clamp(-max_lean, max_lean);
+        let setpoint = -kv * self.speed_est - position_lean;
         let motor_cmd = clamp_duty(-self.pid.update(setpoint, filter_pitch, dt_s));
 
         // The motors behave like speed sources and the deadband compensation
         // makes the duty roughly proportional to the speed, so the wheels
         // follow the command with the motor's lag.
         self.speed_est += (motor_cmd - self.speed_est) * dt_s / self.config.speed_tau_s;
+        self.pos_est += self.speed_est * dt_s;
+        // Stop the estimate where the lean it asks for is clamped, so it
+        // comes back within seconds once the robot rolls back (like
+        // anti-windup for the I term).
+        if kx > 0.0 {
+            let max_pos = max_lean / kx;
+            self.pos_est = self.pos_est.clamp(-max_pos, max_pos);
+        }
 
         Output {
             accel_pitch_deg: accel_pitch,
@@ -257,6 +307,7 @@ impl Controller {
             filter_pitch_deg: filter_pitch,
             motor_cmd,
             speed_est: self.speed_est,
+            pos_est: self.pos_est,
         }
     }
 }
@@ -291,6 +342,7 @@ mod tests {
                 ki,
                 kd,
                 kv: 0.0,
+                kx: 0.0,
             },
             ..Config::PROTOTYPE
         };
@@ -352,6 +404,7 @@ mod tests {
                     ki: 0.0,
                     kd: 0.0,
                     kv: 6.0,
+                    kx: 0.0,
                 },
                 ..Config::PROTOTYPE
             },
@@ -362,6 +415,47 @@ mod tests {
             out = controller.step(&sample(1.0, 0), DT);
         }
         assert_close(out.motor_cmd, 0.05 / (1.0 - 0.05 * 6.0), 2e-3);
+    }
+
+    #[test]
+    fn position_estimate_integrates_the_speed_and_resets() {
+        // P only, held at 2°: the speed estimate settles at the command, and
+        // the position estimate grows by speed · dt every step.
+        let mut controller = with_gains(0.09, 0.0, 0.0);
+        let mut prev = controller.step(&sample(2.0, 0), DT);
+        for _ in 0..500 {
+            let out = controller.step(&sample(2.0, 0), DT);
+            assert_close(out.pos_est - prev.pos_est, out.speed_est * DT, 1e-6);
+            prev = out;
+        }
+        assert!(prev.pos_est > 0.15, "{prev:?}");
+        controller.reset_pid();
+        assert_close(controller.step(&sample(2.0, 0), DT).pos_est, 0.0, 1e-3);
+    }
+
+    #[test]
+    fn position_feedback_asks_for_at_most_the_max_lean() {
+        // kx 20 with the robot driven forward for a long time: the position
+        // estimate stops at max_position_lean_deg / kx, so the lean it asks
+        // for stays at 3°.
+        let config = Config {
+            gains: Gains {
+                kp: 0.09,
+                ki: 0.0,
+                kd: 0.0,
+                kv: 0.0,
+                kx: 20.0,
+            },
+            ..Config::PROTOTYPE
+        };
+        let mut controller = Controller::new(config, GyroBias([0.0; 3]));
+        let mut out = controller.step(&sample(5.0, 0), DT);
+        for _ in 0..5000 {
+            out = controller.step(&sample(5.0, 0), DT);
+        }
+        assert_close(out.pos_est, 3.0 / 20.0, 1e-4);
+        // P acts on pitch + 3°: 0.09 · (5 + 3).
+        assert_close(out.motor_cmd, 0.09 * 8.0, 0.01);
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! Grid search for the controller gains in simulation, including the speed
-//! feedback `kv`.
+//! feedback `kv` and the position feedback `kx`.
 //!
 //! `cargo run --release -p sim --example tune`
 //!
-//! `... --example tune -- --check KP KI KD KV` instead stress-tests one gain
-//! set on harder variants (more seeds, 1.5° balance error, 30 ms dead time,
-//! motor ±30 % speed, low battery, other starts) and prints each result.
+//! `... --example tune -- --check KP KI KD KV [KX]` instead stress-tests one
+//! gain set on harder variants (more seeds, 1.5° balance error, 30 ms dead
+//! time, motor ±30 % speed, low battery, other starts) and prints each result,
+//! including how far the robot ends up from where it was let go.
 //!
 //! Each candidate is let go at 4.5° and run for 10 s on the prototype's
 //! deadband motor with `Drive::PROTOTYPE` in between, as on the robot. It must
@@ -18,9 +19,9 @@
 //!   showed that an error of a fraction of a degree is enough for the tilt-only
 //!   PID to speed up until the motors saturate and the robot falls.
 //!
-//! Survivors are ranked by the worst-case **drift speed** in the last 5 s
-//! (a balance-point error can only be turned into a steady drift, not
-//! removed), then by the worst |pitch|.
+//! Survivors are ranked by the worst-case **distance from the start** over
+//! the last 5 s (without `kx` a balance-point error turns into a steady
+//! drift, with it into a fixed offset), then by the worst |pitch|.
 
 use std::thread;
 
@@ -41,10 +42,20 @@ const VARIANTS: [(f64, usize, f64); 9] = [
     (15.0, 20, -1.0),
 ];
 
-/// Worst case over [`VARIANTS`]: (largest |axle speed| in m/s, largest
+/// Largest |axle position| in m over the last `last_s` seconds.
+fn max_abs_position_m(run: &sim::closed_loop::Run, last_s: f64) -> f64 {
+    let end = run.ticks.last().map_or(0.0, |t| t.t_s);
+    run.ticks
+        .iter()
+        .filter(|t| t.t_s >= end - last_s)
+        .map(|t| t.axle_pos_m.abs())
+        .fold(0.0, f64::max)
+}
+
+/// Worst case over [`VARIANTS`]: (largest |axle position| in m, largest
 /// |pitch| in degrees), both over the last 5 s. `None` if any variant fell.
 fn worst_case(gains: Gains) -> Option<(f64, f64)> {
-    let (mut speed, mut pitch): (f64, f64) = (0.0, 0.0);
+    let (mut position, mut pitch): (f64, f64) = (0.0, 0.0);
     // A different IMU noise seed per variant.
     for (seed, (lag_ms, dead_ms, offset_deg)) in (1_u64..).zip(VARIANTS) {
         let motor = Motor {
@@ -64,11 +75,14 @@ fn worst_case(gains: Gains) -> Option<(f64, f64)> {
         if run.fell_at_s.is_some() {
             return None;
         }
-        speed = speed.max(run.max_abs_speed_m_s(5.0));
+        position = position.max(max_abs_position_m(&run, 5.0));
         pitch = pitch.max(run.max_abs_pitch_deg(5.0));
     }
-    Some((speed, pitch))
+    Some((position, pitch))
 }
+
+/// Position-feedback gains tried in the grid.
+const KX_GRID: [f32; 6] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0];
 
 /// One stress-test run: (lag ms, dead ms, balance error °, speed factor,
 /// battery V, start °, seed).
@@ -95,7 +109,9 @@ fn stress_runs() -> Vec<Stress> {
 }
 
 fn check(gains: Gains) {
-    println!("lag dead  err  speed  batt  start  -> fell / max|v| last 5 s / max|pitch| / sat %");
+    println!(
+        "lag dead  err  speed  batt  start  -> fell / max|v| last 5 s / max|pitch| / sat % / max|x| last 5 s"
+    );
     let mut fell = 0;
     let runs = stress_runs();
     for &(lag, dead, offset, speed_factor, battery, start, seed) in &runs {
@@ -129,12 +145,13 @@ fn check(gains: Gains) {
             fell += 1;
         }
         println!(
-            "{lag:>3} {dead:>4} {offset:>+4.1} {speed_factor:>6.1} {battery:>5.1} {start:>6.1}  -> {:>6} {:>6.3} m/s {:>6.2}° {:>4.0} %",
+            "{lag:>3} {dead:>4} {offset:>+4.1} {speed_factor:>6.1} {battery:>5.1} {start:>6.1}  -> {:>6} {:>6.3} m/s {:>6.2}° {:>4.0} % {:>6.3} m",
             run.fell_at_s
                 .map_or("-".to_string(), |t| format!("{t:.1} s")),
             run.max_abs_speed_m_s(5.0),
             run.max_abs_pitch_deg(5.0),
-            sat * 100.0
+            sat * 100.0,
+            max_abs_position_m(&run, 5.0)
         );
     }
     println!("fell in {fell} of {} runs", runs.len());
@@ -146,19 +163,29 @@ fn main() {
         .filter_map(|a| a.parse().ok())
         .collect();
     if std::env::args().nth(1).as_deref() == Some("--check") {
-        if let [kp, ki, kd, kv] = args[..] {
-            check(Gains { kp, ki, kd, kv });
-        } else {
-            eprintln!("usage: tune [--check KP KI KD KV]");
+        match args[..] {
+            [kp, ki, kd, kv] => check(Gains {
+                kp,
+                ki,
+                kd,
+                kv,
+                kx: 0.0,
+            }),
+            [kp, ki, kd, kv, kx] => check(Gains { kp, ki, kd, kv, kx }),
+            _ => eprintln!("usage: tune [--check KP KI KD KV [KX]]"),
         }
         return;
     }
     let mut grid = Vec::new();
-    for kp in [0.06, 0.09, 0.12, 0.15, 0.2] {
-        for ki in [0.5, 1.0, 2.0, 3.0] {
-            for kd in [0.002, 0.003, 0.004, 0.006] {
-                for kv in [-16.0, -8.0, -4.0, -2.0, 0.0, 2.0, 4.0, 8.0, 16.0] {
-                    grid.push(Gains { kp, ki, kd, kv });
+    // Around the speed-feedback set that balances on the robot (kp 0.09,
+    // ki 0.5, kd 0.003, kv 6); kv must be positive (see `Gains::kv`).
+    for kp in [0.06, 0.09, 0.12] {
+        for ki in [0.25, 0.5, 1.0] {
+            for kd in [0.002, 0.003, 0.004] {
+                for kv in [3.0, 4.0, 6.0, 8.0] {
+                    for kx in KX_GRID {
+                        grid.push(Gains { kp, ki, kd, kv, kx });
+                    }
                 }
             }
         }
@@ -189,19 +216,25 @@ fn main() {
         grid.len(),
         VARIANTS.len()
     );
-    println!("   kp     ki     kd     kv   worst |speed|  worst |pitch|  (last 5 s)");
-    for ((speed, pitch), Gains { kp, ki, kd, kv }) in results.iter().take(25) {
-        println!("{kp:>5.2} {ki:>6.2} {kd:>6.3} {kv:>6.1}   {speed:>8.3} m/s   {pitch:>8.2}°");
+    println!("   kp     ki     kd     kv     kx   worst |x|   worst |pitch|  (last 5 s)");
+    for ((position, pitch), Gains { kp, ki, kd, kv, kx }) in results.iter().take(25) {
+        println!(
+            "{kp:>5.2} {ki:>6.2} {kd:>6.3} {kv:>6.1} {kx:>6.1}   {position:>7.3} m   {pitch:>8.2}°"
+        );
     }
-    let kv_counts: Vec<_> = [-16.0, -8.0, -4.0, -2.0, 0.0, 2.0, 4.0, 8.0, 16.0]
-        .iter()
-        .map(|&kv| {
-            let n = results
-                .iter()
-                .filter(|(_, g)| (g.kv - kv).abs() < 1e-3)
-                .count();
-            format!("kv {kv}: {n}")
-        })
-        .collect();
-    println!("survivors per kv: {}", kv_counts.join(", "));
+    // Best per kx: how much the position feedback buys.
+    for kx in KX_GRID {
+        let best = results.iter().find(|(_, g)| (g.kx - kx).abs() < 1e-3);
+        let n = results
+            .iter()
+            .filter(|(_, g)| (g.kx - kx).abs() < 1e-3)
+            .count();
+        match best {
+            Some(((position, pitch), g)) => println!(
+                "kx {kx:>4}: {n:>3} survive; best {position:.3} m, {pitch:.2}° (kp {} ki {} kd {} kv {})",
+                g.kp, g.ki, g.kd, g.kv
+            ),
+            None => println!("kx {kx:>4}: none survive"),
+        }
+    }
 }

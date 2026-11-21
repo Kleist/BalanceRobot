@@ -221,6 +221,7 @@ const SIGN_CHECK_GAINS: Gains = Gains {
     ki: 0.0,
     kd: 0.0,
     kv: 0.0,
+    kx: 0.0,
 };
 
 /// The direction check's command for both motors, by time since the start of the check.
@@ -425,11 +426,12 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
                     filter_pitch_deg: filter_pitch,
                     motor_cmd,
                     speed_est,
+                    pos_est,
                 },
             duty_pct: [duty_l, duty_r],
         } => writeln!(
             line,
-            "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1},{motor_cmd:>9.3},{duty_l:>6},{duty_r:>6},{speed_est:>9.3}",
+            "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1},{motor_cmd:>9.3},{duty_l:>6},{duty_r:>6},{speed_est:>9.3},{pos_est:>9.3}",
             a[0], a[1], a[2], g[0], g[1], g[2]
         ),
         LogMsg::Battery { battery_v, pin_mv } => {
@@ -672,7 +674,7 @@ pub async fn run(spawner: Spawner, experiment: Experiment) {
         GYRO_RANGE.scale_factor()
     );
     println!(
-        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6},{:>9}",
+        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6},{:>9},{:>9}",
         "t_us",
         "ax",
         "ay",
@@ -689,7 +691,8 @@ pub async fn run(spawner: Spawner, experiment: Experiment) {
         "motor_cmd",
         "duty_l",
         "duty_r",
-        "speed_est"
+        "speed_est",
+        "pos_est"
     );
 
     // From here on, log lines go through the queue to the log task, which owns the async
