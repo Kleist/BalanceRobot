@@ -33,7 +33,9 @@ pub struct Row {
     pub duty_pct: [f64; 2],
 }
 
-/// Number of columns in a firmware CSV row.
+/// Number of columns a firmware CSV row has at least (logs from before the
+/// `speed_est` column have exactly this many). Later columns are ignored, so
+/// old and new logs both parse.
 pub const COLUMNS: usize = 16;
 
 /// Parses one CSV row, or `None` for anything else (comments, the header,
@@ -41,7 +43,7 @@ pub const COLUMNS: usize = 16;
 #[must_use]
 pub fn parse_row(line: &str) -> Option<Row> {
     let fields: Vec<&str> = line.split(',').map(str::trim).collect();
-    if fields.len() != COLUMNS {
+    if fields.len() < COLUMNS {
         return None;
     }
     let f = |i: usize| fields.get(i).and_then(|v| v.parse::<f64>().ok());
@@ -322,6 +324,13 @@ mod tests {
         assert!((row.filter_pitch_deg + 17.1).abs() < 1e-9);
         assert!((row.motor_cmd + 0.514).abs() < 1e-9);
         assert!(row.duty_pct.iter().all(|d| (d + 51.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn parses_a_row_with_the_speed_est_column() {
+        // Logs since speed feedback (D2) have a 17th column; it is ignored here.
+        let row = parse_row(&format!("{ROW},    0.123")).unwrap();
+        assert!((row.motor_cmd + 0.514).abs() < 1e-9);
     }
 
     #[test]
