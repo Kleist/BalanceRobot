@@ -23,6 +23,16 @@ defmt = "1"
 defmt-rtt = "1"
 # Panic handler: logs the panic message over defmt and makes probe-rs exit with an error.
 panic-probe = { version = "1", features = ["print-defmt"] }
+# Embassy HAL for the nRF52833: GPIO with async edge waits (`gpiote`), and the time driver
+# for `embassy-time` on RTC1, a 32.768 kHz low-power counter (`time-driver-rtc1`).
+# Not microbit-bsp: its latest release (0.4) is built on embassy-nrf 0.4, while the BLE
+# stack we need later (nrf-sdc 0.4, trouble-host 0.8) needs embassy-nrf 0.11.
+embassy-nrf = { version = "0.11", features = ["nrf52833", "gpiote", "time-driver-rtc1", "defmt"] }
+# Async executor: `platform-cortex-m` + `executor-thread` run the tasks in thread mode and
+# sleep the CPU (WFE) while all of them wait.
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+# Async `Timer`.
+embassy-time = { version = "0.5", features = ["defmt"] }
 
 # Same policy as [workspace.lints] in the root Cargo.toml; keep the three in sync.
 [lints.rust]
