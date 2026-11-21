@@ -1,0 +1,18 @@
+[build]
+# nRF52833: Cortex-M4 with FPU ("hf" = hardware floating point, which the C3 lacks).
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+# `cargo run` flashes the micro:bit through its onboard CMSIS-DAP probe, resets it and
+# shows the defmt log (read over RTT, decoded with the strings in the ELF).
+runner = "probe-rs run --chip nRF52833_xxAA"
+rustflags = [
+  # Linker script from cortex-m-rt: vector table and sections; it includes our memory.x.
+  "-C", "link-arg=-Tlink.x",
+  # Linker script from defmt: keeps the format strings in a section that is not flashed.
+  "-C", "link-arg=-Tdefmt.x",
+]
+
+[env]
+# Which defmt levels are compiled in (trace, debug, info, warn, error).
+DEFMT_LOG = "info"

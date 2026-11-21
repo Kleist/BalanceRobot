@@ -82,7 +82,7 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
 
   Save a log with e.g. `cargo balance | tee ../balance-4.log`. The log starts with `# experiment: ...`. Flashing needs the user in the `dialout` group. A new experiment = a variant of `Experiment` + a 20-line file in `src/bin` + an alias.
 - `remote/` (from step E1) - micro:bit v2 firmware, its own cargo workspace like `firmware/` (target `thumbv7em-none-eabihf`, `probe-rs run --chip nRF52833_xxAA` runner, `defmt` + RTT logging). `cd remote && cargo run --release` flashes and shows the log; needs `cargo install probe-rs-tools` and the probe-rs udev rule. Keeps the same lint block. Shared logic (tilt → command, packet format) lives in `balance-core`, so `balance-core` must also build for `thumbv7em-none-eabihf`.
-- Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests), mirrored in `firmware/Cargo.toml`; keep the two in sync. CI treats warnings as errors.
+- Lint policy lives in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic, no `unsafe`, no `unwrap`/`expect`/`panic` outside tests), mirrored in `firmware/Cargo.toml` and `remote/Cargo.toml`; keep the three in sync. CI treats warnings as errors.
 - Toolchain is pinned in `rust-toolchain.toml`.
 - Coverage is **reported, not enforced**: CI posts a PR comment comparing base vs PR. Decide per PR whether a drop is acceptable.
 
