@@ -5,10 +5,20 @@ edition = "2024"
 rust-version = "1.98"
 description = "ESP32-C3 firmware: hardware glue around balance-core"
 publish = false
+# `cargo run` without `--bin` runs the experiment that never drives the motors. The
+# others have aliases in `.cargo/config.toml` (`cargo balance`, `cargo sign-check`, ...).
+default-run = "imu_log"
 
 # Own workspace: this crate only builds for the RISC-V target, so it stays out of the
 # host workspace in the repo root (which runs host tests and clippy on all targets).
 [workspace]
+
+# No test harness on the bare-metal target: logic is tested on the host in balance-core and
+# sim. The binaries in src/bin (one per experiment) are found automatically.
+[lib]
+test = false
+doctest = false
+bench = false
 
 [dependencies]
 # `unstable` unlocks drivers whose API may still change in minor releases; we need it for
@@ -61,3 +71,28 @@ opt-level = "s"
 debug = 2       # debug info stays on the host, it is not flashed
 lto = "fat"
 codegen-units = 1
+
+[[bin]]
+name = "imu_log"
+test = false
+bench = false
+
+[[bin]]
+name = "deadband_test"
+test = false
+bench = false
+
+[[bin]]
+name = "motor_check"
+test = false
+bench = false
+
+[[bin]]
+name = "sign_check"
+test = false
+bench = false
+
+[[bin]]
+name = "balance"
+test = false
+bench = false

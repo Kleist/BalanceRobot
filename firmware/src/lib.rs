@@ -1,3 +1,7 @@
+//! The firmware as a library: [`run`] does everything, for the [`Experiment`] a binary in
+//! `src/bin` picks (one per experiment, launched with a cargo alias such as `cargo
+//! balance`, see `.cargo/config.toml`), so no constant has to be edited to switch.
+//!
 //! Read raw accelerometer and gyro samples from the onboard ICM-42670-P and log them
 //! over USB-Serial-JTAG as CSV lines, followed by the pitch angle computed from the
 //! accelerometer alone, the bias-corrected gyro rates, the pitch from integrating the gyro
@@ -20,8 +24,8 @@
 //!
 //! At startup the gyro bias is calibrated while the robot stands still.
 //! Each sample then goes through `balance_core::control::Controller` (the same code the
-//! simulator runs), which computes the pitch estimates and a motor command. With
-//! `CONTROL_ENABLED` the command drives both motors (while the safety cut-offs allow it
+//! simulator runs), which computes the pitch estimates and a motor command. In the
+//! sign-check and balance experiments the command drives both motors (while the safety cut-offs allow it
 //! and no motor test or direction check runs), through the deadband compensation and
 //! battery scaling of `balance_core::drive`; otherwise the motors stay off. While the
 //! motors are off the PID is held reset, so it starts from scratch when they come on.
@@ -34,7 +38,7 @@
 //!   inside an interrupt, so its tick preempts the thread-mode tasks even in the middle of
 //!   formatting a log line.
 //!
-//! Deadband test (off unless `MOTOR_TEST_ENABLED`), after calibration: each motor in turn,
+//! Deadband test ([`Experiment::DeadbandTest`]), after calibration: each motor in turn,
 //! forward then backward, ramps the PWM duty up from 20 % to 50 % and back down to 10 % in
 //! 2 % steps (0.5 s each), then
 //! stops for 1 s (see `motor_test_step`). Watch the wheel and note at which logged duty it
@@ -49,12 +53,11 @@
 //! as a `# safety: ...` line. The motor test and direction check below obey them, so hold
 //! the robot upright (wheels in the air) while they run.
 //!
-//! Direction check (off unless `MOTOR_CHECK_ENABLED`), after calibration: both motors get
+//! Direction check ([`Experiment::MotorCheck`]), after calibration: both motors get
 //! `Motor::set(+0.5)` for 2 s, stop for 2 s, `set(-0.5)` for 2 s, then stay off. `+` must
 //! turn both wheels the way that drives the robot forward.
 
 #![no_std]
-#![no_main]
 
 use balance_core::{
     battery::Divider,
@@ -92,8 +95,6 @@ use esp_println::println;
 use esp_rtos::embassy::InterruptExecutor;
 use icm42670::{AccelOdr, AccelRange, Address, GyroOdr, GyroRange, Icm42670, prelude::*};
 use static_cell::StaticCell;
-
-esp_bootloader_esp_idf::esp_app_desc!();
 
 /// ±4 g: a balancing robot stays well below that, and it keeps 8192 LSB per g.
 const ACCEL_RANGE: AccelRange = AccelRange::G4;
@@ -137,7 +138,7 @@ const BATTERY_LOG_EVERY_N_SAMPLES: u32 = 250;
 /// low whine and a ripple at 100 Hz (the control loop runs at 500 Hz, so a command is
 /// updated several times per PWM period). The LEDC timer needs a clock divider in range:
 /// at 10-bit duty the lowest possible frequency is about 78 Hz. To compare frequencies,
-/// change this, reflash and rerun the deadband test (`MOTOR_TEST_ENABLED`); the log notes
+/// change this, reflash and rerun the deadband test (`cargo deadband-test`); the log notes
 /// the frequency of each run.
 const MOTOR_PWM_FREQUENCY: Rate = Rate::from_hz(100);
 
@@ -164,24 +165,50 @@ const MOTOR_TEST_RAMPS: [(Side, Direction); 4] = [
 ];
 /// Passes through `MOTOR_TEST_RAMPS` before the test ends and the motors stay off.
 const MOTOR_TEST_PASSES: u64 = 2;
-/// Run the deadband test after calibration. Off while working on the IMU, because the
-/// test pauses the CSV log; set to `true` to run it again.
-const MOTOR_TEST_ENABLED: bool = false;
-
-/// Direction check (off unless enabled; not together with `MOTOR_TEST_ENABLED`): after
-/// calibration both motors get `+MOTOR_CHECK_CMD` for `MOTOR_CHECK_STEP_MS`, stop for the
-/// same time, run at `-MOTOR_CHECK_CMD`, then stay off. With the wheels in the air, +
-/// must turn both wheels the way that drives the robot forward.
-const MOTOR_CHECK_ENABLED: bool = false;
+/// Direction check: after calibration both motors get `+MOTOR_CHECK_CMD` for
+/// `MOTOR_CHECK_STEP_MS`, stop for the same time, run at `-MOTOR_CHECK_CMD`, then stay off.
+/// With the wheels in the air, + must turn both wheels the way that drives the robot
+/// forward.
 const MOTOR_CHECK_CMD: f32 = 0.5;
 const MOTOR_CHECK_STEP_MS: u64 = 2000;
 
-/// Apply the controller's command to both motors. Off by default, so flashing for any
-/// other reason never drives the wheels by surprise: set it to `true` on purpose, for the
-/// sign check (wheels in the air, `SIGN_CHECK_GAINS`) or a balance attempt (on the floor,
-/// hand ready). Ignored while `MOTOR_TEST_ENABLED` or
-/// `MOTOR_CHECK_ENABLED` is set (those own the motors then).
-const CONTROL_ENABLED: bool = true;
+/// What the firmware does after setup and calibration. Each binary in `src/bin` runs one
+/// (launch with the cargo aliases in `.cargo/config.toml`, e.g. `cargo balance`), so
+/// switching experiments never needs a code change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Experiment {
+    /// Log the IMU, pitch estimates and the controller's command; the motors stay off.
+    ImuLog,
+    /// Deadband ramps, one motor and direction at a time (wheels in the air).
+    DeadbandTest,
+    /// Both motors +0.5, stop, −0.5, then off (wheels in the air): checks the direction.
+    MotorCheck,
+    /// The controller drives the motors with the P-only `SIGN_CHECK_GAINS` (wheels in the
+    /// air): tilting forward must spin the wheels forward.
+    SignCheck,
+    /// The controller drives the motors with `Config::PROTOTYPE.gains` (on the floor,
+    /// hand ready).
+    Balance,
+}
+
+impl Experiment {
+    /// Whether the controller's command is applied to the motors. Only in the sign check
+    /// and the balance attempt, so any other experiment never drives the wheels from the
+    /// controller by surprise.
+    const fn control_drives_motors(self) -> bool {
+        matches!(self, Self::SignCheck | Self::Balance)
+    }
+
+    /// The gains the controller runs with. The balance gains are wrong for the sign check:
+    /// held tilted with the wheels in the air, their I term winds up and the wheels race.
+    const fn gains(self) -> Gains {
+        if matches!(self, Self::SignCheck) {
+            SIGN_CHECK_GAINS
+        } else {
+            Config::PROTOTYPE.gains
+        }
+    }
+}
 
 /// Gains for the sign check (wheels in the air): P only, so the wheel speed simply follows
 /// the tilt and nothing builds up over time. kp 0.03 per degree gives a command of 0.3 at
@@ -194,18 +221,6 @@ const SIGN_CHECK_GAINS: Gains = Gains {
     ki: 0.0,
     kd: 0.0,
     kv: 0.0,
-};
-
-/// Which gains the controller runs with. `true`: `Config::PROTOTYPE.gains` (kp 0.12,
-/// ki 2.0, kd 0.008), tuned in simulation, for a balance attempt on the floor (bring-up
-/// step C3). `false`: `SIGN_CHECK_GAINS`, for the sign check with the wheels in the air;
-/// don't use the balance gains for that: held tilted, their I term winds up to full
-/// command within a second and the wheels race.
-const BALANCE_GAINS: bool = true;
-const CONTROL_GAINS: Gains = if BALANCE_GAINS {
-    Config::PROTOTYPE.gains
-} else {
-    SIGN_CHECK_GAINS
 };
 
 /// The direction check's command for both motors, by time since the start of the check.
@@ -522,11 +537,17 @@ fn output_low<'d>(pin: impl OutputPin + 'd) -> Output<'d> {
     Output::new(pin, Level::Low, OutputConfig::default())
 }
 
-/// `#[esp_rtos::main]` sets up the Embassy executor and runs this as its first task.
-/// `spawner` starts more tasks.
-#[esp_rtos::main]
-async fn main(spawner: Spawner) {
+/// Sets everything up, calibrates the gyro and starts the tasks for `experiment`.
+///
+/// Called from each binary's `main`, which `#[esp_rtos::main]` runs as the first task of
+/// the Embassy executor; `spawner` starts more tasks. Returns once the tasks run.
+#[allow(
+    clippy::too_many_lines,
+    reason = "setup in order, top to bottom: pins, timers, battery, IMU, calibration, tasks"
+)]
+pub async fn run(spawner: Spawner, experiment: Experiment) {
     let mut peripherals = esp_hal::init(esp_hal::Config::default());
+    println!("# experiment: {experiment:?}");
 
     // L298N inputs: drive all of them low first thing. Until this point they float, and a
     // floating EN that happens to read high while its IN pins differ spins the motor.
@@ -612,7 +633,7 @@ async fn main(spawner: Spawner) {
     // the range the chip was actually set to.
     let config = Config {
         gyro_lsb_per_dps: GYRO_RANGE.scale_factor(),
-        gains: CONTROL_GAINS,
+        gains: experiment.gains(),
         ..Config::PROTOTYPE
     };
 
@@ -690,6 +711,7 @@ async fn main(spawner: Spawner) {
     let executor = CONTROL_EXECUTOR.init(InterruptExecutor::new(peripherals.FROM_CPU_INTR1));
     let control_spawner = executor.start(Priority::Priority2);
     let parts = ControlParts {
+        experiment,
         i2c,
         battery,
         controller: Controller::new(config, bias),
@@ -717,6 +739,7 @@ async fn main(spawner: Spawner) {
 /// of this must be `Send`. The motors' LEDC channels aren't (they hold a reference to a
 /// timer trait object), so the task builds them itself from the raw peripherals.
 struct ControlParts {
+    experiment: Experiment,
     i2c: I2c<'static, Blocking>,
     battery: Battery,
     /// Plain numbers only (settings, bias, filter and PID state), so it is `Send`.
@@ -759,21 +782,22 @@ fn apply_test_step(
     }
 }
 
-/// Drives both motors with the controller's command, if `CONTROL_ENABLED` and no motor
-/// test or direction check owns the motors; stopped while the safety cut-offs say no.
+/// Drives both motors with the controller's command, if the experiment lets the controller
+/// drive them; stopped while the safety cut-offs say no.
 ///
 /// The command goes through `Drive::PROTOTYPE` first (bring-up steps B2/B3, the same code
 /// the simulator tests): deadband compensation maps it onto the duty range where a turning
 /// wheel actually moves (8 %..100 %), and battery scaling (× 7.4 V / battery) gives the
 /// same wheel speed per command on a full and a nearly empty pack.
 fn apply_control(
+    experiment: Experiment,
     cmd: f32,
     battery_v: f32,
     motors_allowed: bool,
     left: &mut Motor<'_>,
     right: &mut Motor<'_>,
 ) -> Result<(), channel::Error> {
-    if !CONTROL_ENABLED || MOTOR_TEST_ENABLED || MOTOR_CHECK_ENABLED {
+    if !experiment.control_drives_motors() {
         return Ok(());
     }
     let duty = if motors_allowed {
@@ -849,6 +873,7 @@ async fn setup_motors(
 async fn control_loop(parts: ControlParts) {
     let (mut left, mut right) = setup_motors(parts.ledc, parts.left, parts.right).await;
     let ControlParts {
+        experiment,
         mut i2c,
         mut battery,
         mut controller,
@@ -907,7 +932,7 @@ async fn control_loop(parts: ControlParts) {
             log(&mut times, LogMsg::Battery { battery_v, pin_mv });
         }
 
-        let step = if MOTOR_TEST_ENABLED {
+        let step = if experiment == Experiment::DeadbandTest {
             motor_test_step(motor_test_start.elapsed().as_millis() / MOTOR_TEST_STEP_MS)
         } else {
             TestStep::Done
@@ -921,7 +946,7 @@ async fn control_loop(parts: ControlParts) {
             }
         }
 
-        if MOTOR_CHECK_ENABLED {
+        if experiment == Experiment::MotorCheck {
             let elapsed_ms = motor_test_start.elapsed().as_millis();
             let cmd = motor_check_cmd(elapsed_ms, safety.status().motors_allowed());
             if last_check_cmd != Some(cmd) {
@@ -951,9 +976,14 @@ async fn control_loop(parts: ControlParts) {
                 // Apply the command after the safety check of this very sample, so a
                 // tripped cut-off stops the motors in the same iteration.
                 let allowed = safety.status().motors_allowed();
-                if let Err(e) =
-                    apply_control(out.motor_cmd, battery_v, allowed, &mut left, &mut right)
-                {
+                if let Err(e) = apply_control(
+                    experiment,
+                    out.motor_cmd,
+                    battery_v,
+                    allowed,
+                    &mut left,
+                    &mut right,
+                ) {
                     log(&mut times, LogMsg::MotorError(e));
                 }
                 // While the motors are off nothing corrects the pitch, so the I term would
