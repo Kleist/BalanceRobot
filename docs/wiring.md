@@ -32,7 +32,7 @@ flowchart LR
 
 Which motor is "left" and which is "right" is decided when the motors are
 connected; it is recorded in the table below. Checked on the robot with
-`Motor::set(+0.5)` (`MOTOR_CHECK_ENABLED`): the left motor is the one on
+`Motor::set(+0.5)` (the direction check, now `cargo motor-check`): the left motor is the one on
 OUT1 / OUT2 (IN1 / IN2, ENA) and the right one is on OUT3 / OUT4 (IN3 / IN4, ENB).
 Command +1 (IN_a high, IN_b low) turns both wheels forward, with the wiring as it is.
 

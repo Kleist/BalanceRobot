@@ -12,3 +12,12 @@ rustflags = [
   "-C", "force-frame-pointers",
 ]
 
+
+# One command per experiment (each is a binary in src/bin): builds, flashes and opens the
+# log monitor. Save a log with e.g. `cargo balance | tee ../balance-4.log`.
+[alias]
+imu-log = "run --release --bin imu_log"
+deadband-test = "run --release --bin deadband_test"
+motor-check = "run --release --bin motor_check"
+sign-check = "run --release --bin sign_check"
+balance = "run --release --bin balance"
