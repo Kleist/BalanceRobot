@@ -181,7 +181,7 @@ const MOTOR_CHECK_STEP_MS: u64 = 2000;
 /// sign check (wheels in the air, `SIGN_CHECK_GAINS`) or a balance attempt (on the floor,
 /// hand ready). Ignored while `MOTOR_TEST_ENABLED` or
 /// `MOTOR_CHECK_ENABLED` is set (those own the motors then).
-const CONTROL_ENABLED: bool = false;
+const CONTROL_ENABLED: bool = true;
 
 /// Gains for the sign check (wheels in the air): P only, so the wheel speed simply follows
 /// the tilt and nothing builds up over time. kp 0.03 per degree gives a command of 0.3 at
