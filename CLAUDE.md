@@ -189,7 +189,7 @@ Small steps, one PR each, in order. Tick steps off as they are completed; insert
 
 **E. micro:bit remote over BLE (in parallel with C/D; only E12 needs a balancing robot)**
 
-- [ ] Remote skeleton: `remote/` crate (own workspace, `thumbv7em-none-eabihf`), `probe-rs`, "hello" over defmt/RTT; CI builds it. Check: `cd remote && cargo run --release` prints hello
+- [x] Remote skeleton: `remote/` crate (own workspace, `thumbv7em-none-eabihf`), `probe-rs`, "hello" over defmt/RTT; CI builds it. Check: `cd remote && cargo run --release` prints hello. Verified (probe-rs 0.32): hello, then a tick from a 64 M-cycle busy loop (`cortex_m::asm::delay`) every ~7.1 s instead of 1 s ("at least n cycles"; probably flash wait states with the cache off). The runner picks the micro:bit's probe with `--probe 0d28:0204`, since probe-rs also lists the ESP32-C3's USB JTAG when the robot is plugged in
 - [ ] Embassy on the micro:bit: blink one LED of the matrix from a task, log button A/B presses. Check: LED blinks, presses show in the log
 - [ ] Raw accelerometer: LSM303AGR over the internal I2C, log mg at ~50 Hz; tilt it to find the axes (like the robot's axes step) and record them in the hardware table
 - [ ] Tilt → command math in `balance-core` (`remote`: pitch/roll from the accel, dead zone ~5°, full scale ~30°, clamp, light low-pass), unit tested; the micro:bit shows the command as a dot on the 5x5 matrix. Check: the dot follows the tilt and is centred when flat
