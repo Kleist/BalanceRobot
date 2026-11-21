@@ -114,6 +114,7 @@ fn parse_args() -> Result<Options, String> {
                     ki: num("--gains")? as f32,
                     kd: num("--gains")? as f32,
                     kv: o.gains.kv,
+                    kx: o.gains.kx,
                 };
             }
             "--vmax" => o.motor.max_speed_m_s = num("--vmax")?,

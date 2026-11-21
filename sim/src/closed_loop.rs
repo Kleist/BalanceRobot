@@ -298,6 +298,7 @@ mod tests {
         ki: 2.0,
         kd: 0.008,
         kv: 0.0,
+        kx: 0.0,
     };
 
     /// With the ideal (linear) motor.
@@ -309,6 +310,7 @@ mod tests {
                 ki,
                 kd,
                 kv: 0.0,
+                kx: 0.0,
             },
             2.0,
         )
@@ -481,8 +483,13 @@ mod tests {
         // needs the start duty, which the compensation doesn't give. From 2°,
         // 6 of seeds 0-19 end like this (after the IMU axes fix; the seeds
         // changed with it). Seed 4: 18 stops in the last 5 s, pitch up to
-        // ±0.6°, but it stays up.
-        let r = with_drive(2.0, 4, 7.4);
+        // ±0.6°, but it stays up. (Without position feedback: with kx the
+        // robot also rocks around its start spot, up to ~±1.9° here.)
+        let no_kx = Gains {
+            kx: 0.0,
+            ..Config::PROTOTYPE.gains
+        };
+        let r = with_drive_gains(no_kx, 2.0, 4, 7.4);
         assert_eq!(r.fell_at_s, None);
         let stops = r
             .ticks
@@ -602,6 +609,55 @@ mod tests {
             assert_eq!(r.fell_at_s, None, "{offset}°");
             let v = r.max_abs_speed_m_s(5.0);
             assert!(v < 0.15, "{offset}°: {v} m/s");
+        }
+    }
+
+    // Position hold (bring-up step D2, position part).
+
+    fn with_balance_error_for(gains: Gains, offset_deg: f64, seconds: f64) -> super::Run {
+        let imu = crate::imu::ImuParams {
+            mount_tilt_deg: crate::imu::ImuParams::prototype().mount_tilt_deg + offset_deg,
+            ..crate::imu::ImuParams::prototype()
+        };
+        Sim::new(
+            crate::pendulum::Body::prototype(),
+            Motor::prototype().at_battery(7.8),
+            imu,
+            gains,
+            4.5,
+            1,
+        )
+        .unwrap()
+        .with_drive(balance_core::drive::Drive::PROTOTYPE)
+        .run(seconds)
+    }
+
+    #[test]
+    fn position_feedback_stops_the_drift_of_a_balance_error() {
+        // A 1° balance-point error: speed feedback alone settles into a
+        // steady drift (~7 cm/s, 1.4 m in 20 s); with kx 4 the robot stops
+        // where kx · position cancels the error, ε / kx = 0.25 full-speed
+        // seconds ≈ 0.10 m from the start, and stays there.
+        let no_kx = Gains {
+            kx: 0.0,
+            ..Config::PROTOTYPE.gains
+        };
+        for offset in [1.0, -1.0] {
+            let drifting = with_balance_error_for(no_kx, offset, 20.0);
+            assert_eq!(drifting.fell_at_s, None);
+            let x = drifting.last().unwrap().axle_pos_m.abs();
+            assert!(x > 1.0, "kx 0, {offset}°: {x} m");
+
+            let held = with_balance_error_for(Config::PROTOTYPE.gains, offset, 20.0);
+            assert_eq!(held.fell_at_s, None, "{offset}°");
+            let worst = held
+                .ticks
+                .iter()
+                .map(|t| t.axle_pos_m.abs())
+                .fold(0.0, f64::max);
+            assert!(worst < 0.15, "kx 4, {offset}°: {worst} m");
+            let end = held.last().unwrap().axle_pos_m.abs();
+            assert!((0.05..0.15).contains(&end), "kx 4, {offset}°: {end} m");
         }
     }
 }

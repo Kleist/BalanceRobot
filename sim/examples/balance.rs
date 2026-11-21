@@ -28,6 +28,7 @@ fn main() {
             ki: *ki,
             kd: *kd,
             kv: Config::PROTOTYPE.gains.kv,
+            kx: Config::PROTOTYPE.gains.kx,
         },
         _ => Config::PROTOTYPE.gains,
     };

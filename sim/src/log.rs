@@ -28,7 +28,7 @@ pub fn header(bias: GyroBias) -> String {
     format!(
         "# gyro bias (deg/s): x={bx:.3} y={by:.3} z={bz:.3}\n\
          # ICM-42670-P raw samples; accel G4 = 8192 LSB/g, gyro Deg500 = 65.5 LSB/(deg/s)\n\
-         {:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6},{:>9}",
+         {:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6},{:>9},{:>9}",
         "t_us",
         "ax",
         "ay",
@@ -45,7 +45,8 @@ pub fn header(bias: GyroBias) -> String {
         "motor_cmd",
         "duty_l",
         "duty_r",
-        "speed_est"
+        "speed_est",
+        "pos_est"
     )
 }
 
@@ -111,12 +112,13 @@ impl Pipeline {
         let [rx, ry, rz] = out.rates_dps;
         let [duty_l, duty_r] = duty_pct;
         format!(
-            "{t_us:>10},{ax:>6},{ay:>6},{az:>6},{gx:>6},{gy:>6},{gz:>6},{:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{:>16.1},{:>9.3},{duty_l:>6},{duty_r:>6},{:>9.3}",
+            "{t_us:>10},{ax:>6},{ay:>6},{az:>6},{gx:>6},{gy:>6},{gz:>6},{:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{:>14.1},{:>16.1},{:>9.3},{duty_l:>6},{duty_r:>6},{:>9.3},{:>9.3}",
             out.accel_pitch_deg,
             out.gyro_pitch_deg,
             out.filter_pitch_deg,
             out.motor_cmd,
-            out.speed_est
+            out.speed_est,
+            out.pos_est
         )
     }
 }
@@ -170,7 +172,8 @@ mod tests {
                 "motor_cmd",
                 "duty_l",
                 "duty_r",
-                "speed_est"
+                "speed_est",
+                "pos_est"
             ]
         );
         // Fixed-width columns: the header lines up with the rows.
@@ -186,12 +189,12 @@ mod tests {
         // Pitch 4.2: level is 4.2° forward of the balance point (−4.2°).
         // motor_cmd 0.378 = kp 0.09 × 4.2° (no I or D yet in the first step,
         // speed estimate still 0); speed_est 0.015 = one 2 ms step of its
-        // 50 ms lag towards 0.378.
+        // 50 ms lag towards 0.378; pos_est 0.000 = its integral over one step.
         assert_eq!(
             fields(&row),
             [
                 "2000", "8192", "0", "0", "0", "131", "0", "4.2", "0.00", "0.00", "0.00", "4.2",
-                "4.2", "0.378", "-12", "34", "0.015"
+                "4.2", "0.378", "-12", "34", "0.015", "0.000"
             ]
         );
     }
