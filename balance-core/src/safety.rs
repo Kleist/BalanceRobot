@@ -11,6 +11,14 @@
 //!   also means a person has to stand the robot up on purpose before it drives
 //!   again. The state starts *not upright*: the motors stay off at power-up
 //!   until the robot has been held upright once.
+//!
+//!   Re-arming also needs the robot to be **held still**: `|pitch rate|` below
+//!   `rearm_rate_dps` for `rearm_hold_s` without a break. Without that, the
+//!   motors came on the moment the robot passed 5° while being swung upright
+//!   (at 40-230 °/s in every balance log so far), so each attempt started with
+//!   the controller fighting that swing at full command. Held still by hand
+//!   the rate is a few °/s. Tripping stays immediate: falling over never
+//!   waits.
 //! - **Battery low.** Li-ion cells are damaged by deep discharge, and below
 //!   about 3.2 V per cell (6.4 V for the 2S pack) there's little energy left
 //!   anyway. Below `warn_v` the state becomes [`Battery::Low`] (just a warning,
@@ -23,8 +31,8 @@
 //!   recovers only because the motors stopped would otherwise switch them back
 //!   on, sag, switch off, and so on.
 //!
-//! The state machine is pure: [`Safety::update`] takes the filter pitch and the
-//! battery voltage and returns the new [`Status`] only when it changed, so the
+//! The state machine is pure: [`Safety::update`] takes the filter pitch, the
+//! pitch rate and the battery voltage and returns the new [`Status`] only when it changed, so the
 //! caller can log each change once.
 
 /// Thresholds for the cut-offs.
@@ -32,8 +40,12 @@
 pub struct Limits {
     /// Motors off when `|pitch|` is above this, in degrees.
     pub fall_deg: f32,
-    /// After a fall, motors allowed again only once `|pitch|` is below this.
+    /// After a fall, motors allowed again only once `|pitch|` is below this...
     pub rearm_deg: f32,
+    /// ...and `|pitch rate|` is below this, in °/s...
+    pub rearm_rate_dps: f32,
+    /// ...both without a break for this long, in seconds.
+    pub rearm_hold_s: f32,
     /// Warn when the battery stays below this voltage, in volts.
     pub warn_v: f32,
     /// Motors off for good when the battery stays below this voltage.
@@ -48,6 +60,12 @@ impl Limits {
     pub const PROTOTYPE: Self = Self {
         fall_deg: 45.0,
         rearm_deg: 5.0,
+        // Held still by hand: ≤ 3 °/s; swung upright: 40-230 °/s when the old
+        // cut-off re-armed (balance-4/5 logs). 20 °/s sits well between.
+        rearm_rate_dps: 20.0,
+        // 100 samples at 500 Hz: long enough that passing through slowly
+        // doesn't count, short enough not to feel like a delay.
+        rearm_hold_s: 0.2,
         warn_v: 6.6,
         off_v: 6.4,
         battery_hold_s: 1.0,
@@ -88,6 +106,8 @@ impl Status {
 pub struct Safety {
     limits: Limits,
     status: Status,
+    /// How long the robot has been held upright and still without a break.
+    still_s: f32,
     /// How long the battery has been below `warn_v` / `off_v` without a break.
     below_warn_s: f32,
     below_off_s: f32,
@@ -104,6 +124,7 @@ impl Safety {
                 upright: false,
                 battery: Battery::Ok,
             },
+            still_s: 0.0,
             below_warn_s: 0.0,
             below_off_s: 0.0,
         }
@@ -115,21 +136,34 @@ impl Safety {
         self.status
     }
 
-    /// Updates the cut-offs with the latest pitch (degrees, 0 = balanced) and
-    /// battery voltage, `dt_s` seconds after the previous update. Returns the
-    /// new status if it changed, `None` otherwise.
+    /// Updates the cut-offs with the latest pitch (degrees, 0 = balanced),
+    /// pitch rate (°/s) and battery voltage, `dt_s` seconds after the previous
+    /// update. Returns the new status if it changed, `None` otherwise.
     ///
     /// A NaN pitch counts as fallen: if the estimate is broken, the motors
-    /// should stop.
-    pub fn update(&mut self, pitch_deg: f32, battery_v: f32, dt_s: f32) -> Option<Status> {
+    /// should stop. A NaN rate never counts as still.
+    pub fn update(
+        &mut self,
+        pitch_deg: f32,
+        pitch_rate_dps: f32,
+        battery_v: f32,
+        dt_s: f32,
+    ) -> Option<Status> {
         let before = self.status;
         let tilt = pitch_deg.abs();
 
         // NaN compares false with everything, so check it explicitly: it trips too.
         if tilt.is_nan() || tilt > self.limits.fall_deg {
             self.status.upright = false;
-        } else if tilt < self.limits.rearm_deg {
-            self.status.upright = true;
+            self.still_s = 0.0;
+        } else if !self.status.upright {
+            // `<` is false for NaN, so a NaN rate restarts the timer.
+            let still =
+                tilt < self.limits.rearm_deg && pitch_rate_dps.abs() < self.limits.rearm_rate_dps;
+            self.still_s = if still { self.still_s + dt_s } else { 0.0 };
+            if self.still_s >= self.limits.rearm_hold_s {
+                self.status.upright = true;
+            }
         }
 
         self.below_warn_s =
@@ -166,19 +200,32 @@ mod tests {
     const DT: f32 = 0.002;
     const FULL: f32 = 8.0;
 
-    /// A safety state that has been held upright once, so the motors are on.
+    /// A safety state that has been held upright and still once, so the motors
+    /// are on.
     fn armed() -> Safety {
         let mut s = Safety::new(Limits::PROTOTYPE);
-        let _ = s.update(0.0, FULL, DT);
+        let _ = hold(&mut s, 0.0, FULL, 0.25);
+        assert!(s.status().motors_allowed());
         s
     }
 
-    /// Feeds the same values for `seconds`; returns the last change, if any.
+    /// Feeds the same values (held still: rate 0) for `seconds`; returns the
+    /// last change, if any.
     fn hold(s: &mut Safety, pitch: f32, battery: f32, seconds: f32) -> Option<Status> {
+        hold_moving(s, pitch, 0.0, battery, seconds)
+    }
+
+    fn hold_moving(
+        s: &mut Safety,
+        pitch: f32,
+        rate: f32,
+        battery: f32,
+        seconds: f32,
+    ) -> Option<Status> {
         let mut last = None;
         let mut t = 0.0;
         while t < seconds {
-            if let Some(status) = s.update(pitch, battery, DT) {
+            if let Some(status) = s.update(pitch, rate, battery, DT) {
                 last = Some(status);
             }
             t += DT;
@@ -191,43 +238,62 @@ mod tests {
         let mut s = Safety::new(Limits::PROTOTYPE);
         assert!(!s.status().motors_allowed());
         // Tilted 20°: between the thresholds, still not armed.
-        assert_eq!(s.update(20.0, FULL, DT), None);
+        assert_eq!(hold(&mut s, 20.0, FULL, 1.0), None);
         assert!(!s.status().motors_allowed());
-        let status = s.update(2.0, FULL, DT);
+        let status = hold(&mut s, 2.0, FULL, 0.25);
         assert!(status.is_some_and(|st| st.motors_allowed()));
     }
 
     #[test]
     fn trips_past_the_fall_angle_either_way() {
         let mut s = armed();
-        assert_eq!(s.update(44.0, FULL, DT), None);
-        let status = s.update(46.0, FULL, DT);
+        assert_eq!(s.update(44.0, 100.0, FULL, DT), None);
+        // Immediate, whatever the rate.
+        let status = s.update(46.0, 100.0, FULL, DT);
         assert!(status.is_some_and(|st| !st.upright && !st.motors_allowed()));
 
         let mut s = armed();
-        assert!(s.update(-46.0, FULL, DT).is_some());
+        assert!(s.update(-46.0, 0.0, FULL, DT).is_some());
         assert!(!s.status().motors_allowed());
     }
 
     #[test]
     fn rearms_only_near_upright() {
         let mut s = armed();
-        let _ = s.update(60.0, FULL, DT);
+        let _ = s.update(60.0, 0.0, FULL, DT);
         // Back below 45° isn't enough: hysteresis.
-        assert_eq!(s.update(30.0, FULL, DT), None);
-        assert_eq!(s.update(6.0, FULL, DT), None);
+        assert_eq!(hold(&mut s, 30.0, FULL, 1.0), None);
+        assert_eq!(hold(&mut s, 6.0, FULL, 1.0), None);
         assert!(!s.status().motors_allowed());
-        assert!(s.update(-4.0, FULL, DT).is_some());
+        assert!(hold(&mut s, -4.0, FULL, 0.25).is_some());
+        assert!(s.status().motors_allowed());
+    }
+
+    #[test]
+    fn rearms_only_when_held_still() {
+        let mut s = Safety::new(Limits::PROTOTYPE);
+        // Swung up through upright at 100 °/s: never arms, however long.
+        assert_eq!(hold_moving(&mut s, 1.0, 100.0, FULL, 1.0), None);
+        // Held still, but not yet 0.2 s.
+        assert_eq!(hold(&mut s, 1.0, FULL, 0.15), None);
+        // A jolt restarts the wait...
+        assert_eq!(s.update(1.0, 50.0, FULL, DT), None);
+        assert_eq!(hold(&mut s, 1.0, FULL, 0.15), None);
+        // ...so it arms 0.2 s after the jolt.
+        assert!(hold(&mut s, 1.0, FULL, 0.06).is_some_and(|st| st.motors_allowed()));
+        // Once armed, balancing at any rate keeps it armed.
+        assert_eq!(hold_moving(&mut s, 3.0, 150.0, FULL, 1.0), None);
         assert!(s.status().motors_allowed());
     }
 
     #[test]
     fn nan_pitch_counts_as_fallen() {
         let mut s = armed();
-        assert!(s.update(f32::NAN, FULL, DT).is_some());
+        assert!(s.update(f32::NAN, 0.0, FULL, DT).is_some());
         assert!(!s.status().motors_allowed());
-        // And NaN doesn't re-arm either.
-        assert_eq!(s.update(f32::NAN, FULL, DT), None);
+        // And NaN doesn't re-arm either, nor does a NaN rate.
+        assert_eq!(hold(&mut s, f32::NAN, FULL, 0.5), None);
+        assert_eq!(hold_moving(&mut s, 0.0, f32::NAN, FULL, 0.5), None);
     }
 
     #[test]

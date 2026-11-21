@@ -47,8 +47,8 @@
 //! are easy to follow. Keep the wheels off the ground.
 //!
 //! Safety cut-offs (`balance_core::safety`), checked after every IMU read: the motors may
-//! only run while the robot is upright (off past ±45°, back on once held within ±5°; off
-//! at power-up until held upright once) and the battery isn't empty (warning below 6.6 V,
+//! only run while the robot is upright (off past ±45°, back on once held within ±5° and
+//! still, below 20 °/s, for 0.2 s; off at power-up until held like that once) and the battery isn't empty (warning below 6.6 V,
 //! off below 6.4 V for good, each after 1 s below the threshold). Every change is logged
 //! as a `# safety: ...` line. The motor test and direction check below obey them, so hold
 //! the robot upright (wheels in the air) while they run.
@@ -61,7 +61,7 @@
 
 use balance_core::{
     battery::Divider,
-    control::{Config, Controller, Gains, Output as ControlOutput},
+    control::{Config, Controller, Gains, Output as ControlOutput, robot_pitch_rate},
     drive::Drive,
     gyro::{BiasCalibrator, GyroBias},
     imu::{DATA_LEN, DATA_START_REGISTER, RawSample},
@@ -970,7 +970,10 @@ async fn control_loop(parts: ControlParts) {
                 // The same code the simulator runs.
                 let out = controller.step(&raw, DT_S);
                 let (pitch, battery_v) = (out.filter_pitch_deg, latest_battery.0);
-                if let Some(status) = safety.update(pitch, battery_v, DT_S) {
+                // The bias-corrected pitch rate: re-arming waits until the robot is held
+                // still, not just upright (see `balance_core::safety`).
+                let rate = robot_pitch_rate(out.rates_dps);
+                if let Some(status) = safety.update(pitch, rate, battery_v, DT_S) {
                     log(&mut times, LogMsg::Safety(status, pitch, battery_v));
                 }
                 // Apply the command after the safety check of this very sample, so a
