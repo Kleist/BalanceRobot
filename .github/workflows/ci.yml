@@ -75,6 +75,27 @@ jobs:
           name: firmware-elf
           path: firmware/target/riscv32imc-unknown-none-elf/release/balance-robot
 
+  remote:
+    name: Remote (micro:bit v2)
+    runs-on: ubuntu-latest
+    # remote/ is its own cargo workspace; its .cargo/config.toml sets the target and linker scripts.
+    defaults:
+      run:
+        working-directory: remote
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: remote
+      - run: cargo fmt --check
+      - run: cargo clippy --release -- -D warnings
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: remote-elf
+          path: remote/target/thumbv7em-none-eabihf/release/balance-remote
+
   docs:
     name: Docs
     runs-on: ubuntu-latest

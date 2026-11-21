@@ -1,0 +1,45 @@
+[package]
+name = "balance-remote"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "BBC micro:bit v2 tilt remote for the balance robot"
+publish = false
+
+# Own workspace: this crate only builds for the Cortex-M4F target (nRF52833), so it stays
+# out of the host workspace in the repo root, like firmware/.
+[workspace]
+
+[dependencies]
+# Low-level Cortex-M access. `critical-section-single-core` provides the critical-section
+# implementation defmt-rtt needs (disable interrupts; fine on a single core).
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+# Startup code: vector table, copies .data / zeroes .bss, then calls our `#[entry]` fn.
+cortex-m-rt = "0.7"
+# Logging framework: the chip sends only an index into a string table plus the raw
+# arguments; probe-rs looks the format string up in the ELF on the host and formats it.
+defmt = "1"
+# Transport for defmt: a ring buffer in RAM that the debug probe reads while the CPU runs.
+defmt-rtt = "1"
+# Panic handler: logs the panic message over defmt and makes probe-rs exit with an error.
+panic-probe = { version = "1", features = ["print-defmt"] }
+
+# Same policy as [workspace.lints] in the root Cargo.toml; keep the three in sync.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+opt-level = "s"
+debug = 2       # debug info (and the defmt string table) stays on the host, it is not flashed
+lto = "fat"
+codegen-units = 1
