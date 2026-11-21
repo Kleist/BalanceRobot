@@ -35,8 +35,15 @@ embassy-nrf = { version = "0.11", features = ["nrf52833", "gpiote", "time-driver
 # Async executor: `platform-cortex-m` + `executor-thread` run the tasks in thread mode and
 # sleep the CPU (WFE) while all of them wait.
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
-# Async `Timer`.
+# Async `Timer` and `Ticker`; `Delay` for the LSM303AGR driver's mode-change waits.
 embassy-time = { version = "0.5", features = ["defmt"] }
+# Driver for the LSM303AGR accelerometer/magnetometer on the micro:bit's internal I2C.
+# `async`: its methods become `async fn`s over the embedded-hal-async I2C trait, which
+# embassy-nrf's TWIM driver implements, so the task sleeps during each transfer.
+lsm303agr = { version = "1.1", features = ["async"] }
+# `StaticCell`: hands out a `&'static mut` to a value once, at runtime, without `unsafe`
+# (the I2C driver's RAM buffer must live as long as the driver).
+static_cell = "2"
 
 # Same policy as [workspace.lints] in the root Cargo.toml; keep the three in sync.
 [lints.rust]
