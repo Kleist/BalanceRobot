@@ -4,8 +4,10 @@ target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]
 # `cargo run` flashes the micro:bit through its onboard CMSIS-DAP probe, resets it and
-# shows the defmt log (read over RTT, decoded with the strings in the ELF).
-runner = "probe-rs run --chip nRF52833_xxAA"
+# shows the defmt log (read over RTT, decoded with the strings in the ELF). `--probe`
+# picks the micro:bit's probe by USB vendor:product id, since probe-rs also lists the
+# ESP32-C3's USB JTAG when the robot is plugged in, and would then ask which to use.
+runner = "probe-rs run --chip nRF52833_xxAA --probe 0d28:0204"
 rustflags = [
   # Linker script from cortex-m-rt: vector table and sections; it includes our memory.x.
   "-C", "link-arg=-Tlink.x",
