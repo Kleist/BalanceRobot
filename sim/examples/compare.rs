@@ -24,6 +24,10 @@
 //!   motor reacts at all, in whole 2 ms controller periods),
 //!   `--start-duty D` and `--stop-duty D` (0.19 / 0.08, as fractions),
 //!   `--ideal` (no deadband).
+//! - `--kv KV`: speed feedback gain (see `balance_core::control::Gains`).
+//! - `--offset-deg D`: the robot's true balance point is `D` degrees off the
+//!   one the controller assumes (simulated as extra chip mounting tilt):
+//!   positive = the controller thinks it leans forward when balanced.
 //! - `--synthetic START_DEG`: instead of reading a log, make one with the
 //!   simulation (from `START_DEG`, prototype motor, seed 2) and compare that:
 //!   a check of the tool itself.
@@ -60,6 +64,7 @@ struct Options {
     dead_time_ticks: usize,
     synthetic: Option<f64>,
     path: Option<String>,
+    offset_deg: f64,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -70,6 +75,7 @@ fn parse_args() -> Result<Options, String> {
         gains: Config::PROTOTYPE.gains,
         motor: Motor::prototype(),
         dead_time_ticks: 0,
+        offset_deg: 0.0,
         synthetic: None,
         path: None,
     };
@@ -107,10 +113,14 @@ fn parse_args() -> Result<Options, String> {
                     kp: num("--gains")? as f32,
                     ki: num("--gains")? as f32,
                     kd: num("--gains")? as f32,
+                    kv: o.gains.kv,
                 };
             }
             "--vmax" => o.motor.max_speed_m_s = num("--vmax")?,
             "--lag-ms" => o.motor.time_constant_s = num("--lag-ms")? * 1e-3,
+            #[allow(clippy::cast_possible_truncation, reason = "gains are small numbers")]
+            "--kv" => o.gains.kv = num("--kv")? as f32,
+            "--offset-deg" => o.offset_deg = num("--offset-deg")?,
             #[allow(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -134,7 +144,10 @@ fn simulate(o: &Options, motor: Motor, start_deg: f64, duration_s: f64, seed: u6
     match Sim::new(
         Body::prototype(),
         motor,
-        ImuParams::prototype(),
+        ImuParams {
+            mount_tilt_deg: ImuParams::prototype().mount_tilt_deg + o.offset_deg,
+            ..ImuParams::prototype()
+        },
         o.gains,
         start_deg,
         seed,
@@ -251,7 +264,7 @@ fn main() {
             }
             eprintln!(
                 "usage: compare [--attempt N] [--every N] [--seed N] [--gains KP KI KD] \
-                 [--vmax M_S] [--lag-ms MS] [--dead-ms MS] [--start-duty D] [--stop-duty D] [--ideal] \
+                 [--vmax M_S] [--lag-ms MS] [--dead-ms MS] [--kv KV] [--offset-deg D] [--start-duty D] [--stop-duty D] [--ideal] \
                  [--synthetic START_DEG] [LOG]"
             );
             std::process::exit(2);

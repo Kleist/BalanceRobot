@@ -34,6 +34,16 @@ pub struct Gains {
     pub ki: f32,
     /// Derivative: command per degree/second of tipping rate.
     pub kd: f32,
+    /// Speed feedback: degrees of pitch per unit of estimated wheel speed
+    /// (fraction of full speed, see [`Controller::step`]). The PID's P and I
+    /// act on `pitch + kv · speed` instead of the pitch alone. 0 = off.
+    ///
+    /// Positive, the same sign as the pitch: to stop rolling forward the
+    /// robot must first drive forward a little harder, so that it leans back
+    /// and then brakes. By itself that is positive feedback (more speed →
+    /// more command), stable only while `kp · kv < 1` (0.54 in
+    /// [`Config::PROTOTYPE`]).
+    pub kv: f32,
 }
 
 /// Everything robot-specific the controller needs.
@@ -55,6 +65,9 @@ pub struct Config {
     pub calibration_max_spread_dps: f32,
     /// PID gains.
     pub gains: Gains,
+    /// Time constant in s of the wheel-speed estimate: how fast the wheels
+    /// follow the command (the motor's lag).
+    pub speed_tau_s: f32,
 }
 
 impl Config {
@@ -71,17 +84,18 @@ impl Config {
     /// - calibration 1000 samples (2 s at 500 Hz), spread ≤ 2 °/s: the gyro's
     ///   noise at rest is about 0.5 °/s peak to peak; moving the robot gives
     ///   tens of °/s.
-    /// - gains kp 0.12, ki 2.0, kd 0.004: tuned in simulation (`sim` crate,
-    ///   `tune` example) with an *ideal* motor, with kd 0.008. The first
-    ///   balance attempt stood but shook at ~8 Hz with the command saturating
-    ///   (kd 0.008 × the ±150 °/s it swung with is more than full command);
-    ///   the simulation reproduces that with a faster motor (30 ms lag) plus
-    ///   ~20 ms dead time, and kd halved to 0.004 stays calm there and on the
-    ///   nominal model (`compare` example, `closed_loop` tests). The I term is
-    ///   essential: with motors
-    ///   that behave like speed sources (DC motors do), P or PD alone can't
-    ///   balance, because ∫pitch is what tells the controller about the
-    ///   wheel speed.
+    /// - gains kp 0.09, ki 0.5, kd 0.003, kv 6 (bring-up step D2, `tune`
+    ///   example): history: kp 0.12 / ki 2.0 / kd 0.008 were tuned on an
+    ///   ideal motor; the first balance attempt shook at ~8 Hz (D term
+    ///   saturating), so kd was halved; the second showed that without speed
+    ///   feedback a balance point off by a fraction of a degree makes the I
+    ///   term add speed until the motors saturate and the robot falls (in
+    ///   simulation 0.25° is enough). The current set survives all 82 stress
+    ///   runs of `tune --check` (balance error up to ±1.5°, motor lag 15-80 ms
+    ///   with up to 30 ms dead time, ±30 % speed, 6.6 V), drifting at most
+    ///   ~0.1 m/s with a 1° error; so do all its neighbours (kp 0.07-0.11,
+    ///   ki 0.35-0.75, kd 0.002-0.004, kv 5-7). kd 0.005 already fails.
+    /// - speed estimate τ 50 ms: the motor model's lag (estimated).
     pub const PROTOTYPE: Self = Self {
         gyro_lsb_per_dps: 65.5,
         balance_pitch_deg: 3.8,
@@ -89,10 +103,12 @@ impl Config {
         calibration_samples: 1000,
         calibration_max_spread_dps: 2.0,
         gains: Gains {
-            kp: 0.12,
-            ki: 2.0,
-            kd: 0.004,
+            kp: 0.09,
+            ki: 0.5,
+            kd: 0.003,
+            kv: 6.0,
         },
+        speed_tau_s: 0.05,
     };
 
     /// Raw gyro LSB `[x, y, z]` to °/s (bias not removed).
@@ -156,6 +172,9 @@ pub struct Output {
     pub filter_pitch_deg: f32,
     /// Motor command for both wheels, −1..=1, positive = drive forward.
     pub motor_cmd: f32,
+    /// Estimated wheel speed as a fraction of full speed, positive =
+    /// forward: the command through a first-order lag (no encoders).
+    pub speed_est: f32,
 }
 
 /// The controller's state between steps.
@@ -166,6 +185,7 @@ pub struct Controller {
     gyro_pitch_deg: Option<f32>,
     filter: ComplementaryFilter,
     pid: Pid,
+    speed_est: f32,
 }
 
 impl Controller {
@@ -173,18 +193,20 @@ impl Controller {
     /// calibration.
     #[must_use]
     pub const fn new(config: Config, bias: GyroBias) -> Self {
-        let Gains { kp, ki, kd } = config.gains;
+        let Gains { kp, ki, kd, .. } = config.gains;
         Self {
             config,
             bias,
             gyro_pitch_deg: None,
             filter: ComplementaryFilter::new(config.filter_tau_s),
             pid: Pid::new(kp, ki, kd, -1.0, 1.0),
+            speed_est: 0.0,
         }
     }
 
-    /// Forgets the PID's I term and D history; the pitch estimates keep
-    /// running.
+    /// Forgets the PID's I term and D history and sets the speed estimate to
+    /// 0 (the wheels stand while the motors are off); the pitch estimates
+    /// keep running.
     ///
     /// Call it while the motors are off (fallen, held, cut off): the pitch
     /// isn't 0 then and nothing corrects it, so the I term would wind up to
@@ -192,6 +214,7 @@ impl Controller {
     /// the motors would start at full power the moment they are allowed again.
     pub fn reset_pid(&mut self) {
         self.pid.reset();
+        self.speed_est = 0.0;
     }
 
     /// Processes one IMU sample taken `dt_s` after the previous one.
@@ -209,7 +232,21 @@ impl Controller {
         // tilted forward, error = 0 − pitch < 0, so its output is negative.
         // The robot must drive *forward* then, to get the wheels back under
         // the centre of mass, hence the minus sign.
-        let motor_cmd = clamp_duty(-self.pid.update(0.0, filter_pitch, dt_s));
+        //
+        // Speed feedback moves the setpoint to −kv · speed, so P and I act on
+        // pitch + kv · speed (D stays on the pitch alone, it differentiates
+        // the measurement). Without it the I term is the only thing that
+        // knows about the speed, and any offset in the measured pitch (a
+        // balance point off by a quarter degree, a sloped floor) makes it add
+        // speed until the motors saturate and the robot falls. With it, an
+        // offset only gives a steady drift.
+        let setpoint = -self.config.gains.kv * self.speed_est;
+        let motor_cmd = clamp_duty(-self.pid.update(setpoint, filter_pitch, dt_s));
+
+        // The motors behave like speed sources and the deadband compensation
+        // makes the duty roughly proportional to the speed, so the wheels
+        // follow the command with the motor's lag.
+        self.speed_est += (motor_cmd - self.speed_est) * dt_s / self.config.speed_tau_s;
 
         Output {
             accel_pitch_deg: accel_pitch,
@@ -217,6 +254,7 @@ impl Controller {
             gyro_pitch_deg: *gyro_pitch,
             filter_pitch_deg: filter_pitch,
             motor_cmd,
+            speed_est: self.speed_est,
         }
     }
 }
@@ -246,7 +284,12 @@ mod tests {
 
     fn with_gains(kp: f32, ki: f32, kd: f32) -> Controller {
         let config = Config {
-            gains: Gains { kp, ki, kd },
+            gains: Gains {
+                kp,
+                ki,
+                kd,
+                kv: 0.0,
+            },
             ..Config::PROTOTYPE
         };
         Controller::new(config, GyroBias([0.0; 3]))
@@ -278,6 +321,45 @@ mod tests {
         assert_close(out.motor_cmd, 2.0 * 2.0 * DT, 1e-3);
         // The pitch estimate is not reset.
         assert_close(out.filter_pitch_deg, 2.0, 0.01);
+    }
+
+    #[test]
+    fn speed_estimate_follows_the_command_with_the_motor_lag() {
+        // P only, held at 2°: command 0.18. After one time constant (50 ms)
+        // the estimate has covered 1 − 1/e ≈ 63 % of the way.
+        let mut controller = with_gains(0.09, 0.0, 0.0);
+        let mut out = controller.step(&sample(2.0, 0), DT);
+        for _ in 1..25 {
+            out = controller.step(&sample(2.0, 0), DT);
+        }
+        assert_close(out.motor_cmd, 0.18, 1e-3);
+        assert_close(out.speed_est, 0.18 * (1.0 - (-1.0_f32).exp()), 0.005);
+        // A reset sets it back to 0 (the wheels stand while the motors are off).
+        controller.reset_pid();
+        assert_close(controller.step(&sample(2.0, 0), DT).speed_est, 0.0, 0.01);
+    }
+
+    #[test]
+    fn speed_feedback_adds_kv_times_speed_to_the_pitch() {
+        // P only with kv 6: once the estimate has settled at the command c,
+        // c = kp · (pitch + kv · c), so c = kp · pitch / (1 − kp · kv).
+        let mut controller = Controller::new(
+            Config {
+                gains: Gains {
+                    kp: 0.05,
+                    ki: 0.0,
+                    kd: 0.0,
+                    kv: 6.0,
+                },
+                ..Config::PROTOTYPE
+            },
+            GyroBias([0.0; 3]),
+        );
+        let mut out = controller.step(&sample(1.0, 0), DT);
+        for _ in 0..2000 {
+            out = controller.step(&sample(1.0, 0), DT);
+        }
+        assert_close(out.motor_cmd, 0.05 / (1.0 - 0.05 * 6.0), 2e-3);
     }
 
     #[test]
