@@ -405,12 +405,13 @@ mod tests {
         assert_eq!(attempt.rows.len(), original.ticks.len().div_ceil(10));
         let again = sim_trace(&run(attempt.start_pitch_deg().unwrap()));
         let robot = attempt.trace();
-        // The first second (the catch from 3°) follows closely; after that
-        // the stick-slip phase amplifies the small start difference, so
-        // only the summary numbers are compared.
+        // The catch from 3° (first 0.6 s) follows closely; after that the
+        // stick-slip phase amplifies the small start difference (with the
+        // speed-feedback gains it starts at ~0.7 s), so only the summary
+        // numbers are compared.
         let worst = robot
             .iter()
-            .filter(|r| r.t_s < 1.0)
+            .filter(|r| r.t_s < 0.6)
             .map(|r| (r.pitch_deg - at(&again, r.t_s).unwrap().pitch_deg).abs())
             .fold(0.0, f64::max);
         assert!(worst < 0.2, "{worst}");

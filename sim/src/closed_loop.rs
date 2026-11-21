@@ -297,13 +297,23 @@ mod tests {
         kp: 0.12,
         ki: 2.0,
         kd: 0.008,
+        kv: 0.0,
     };
 
     /// With the ideal (linear) motor.
     fn run(kp: f32, ki: f32, kd: f32, seconds: f64) -> super::Run {
-        Sim::with_motor(Motor::ideal(), Gains { kp, ki, kd }, 2.0)
-            .unwrap()
-            .run(seconds)
+        Sim::with_motor(
+            Motor::ideal(),
+            Gains {
+                kp,
+                ki,
+                kd,
+                kv: 0.0,
+            },
+            2.0,
+        )
+        .unwrap()
+        .run(seconds)
     }
 
     #[test]
@@ -331,8 +341,9 @@ mod tests {
 
     #[test]
     fn prototype_pid_balances() {
-        let Gains { kp, ki, kd } = Config::PROTOTYPE.gains;
-        let r = run(kp, ki, kd, 10.0);
+        let r = Sim::with_motor(Motor::ideal(), Config::PROTOTYPE.gains, 2.0)
+            .unwrap()
+            .run(10.0);
         assert_eq!(r.fell_at_s, None);
         // Settled: within half a degree over the last 5 s.
         assert!(
@@ -354,8 +365,9 @@ mod tests {
         // never stand still, so only the (low) stop duty matters, and the I
         // term supplies that offset. Constant speed with the body upright is
         // an equilibrium of a tilt-only controller, and the deadband rules
-        // out the speeds near 0.
-        let gains = Config::PROTOTYPE.gains;
+        // out the speeds near 0. (B1 finding: with the B-step gains, no
+        // speed feedback.)
+        let gains = B_STEP_GAINS;
         let r = Sim::prototype(gains, 2.0).unwrap().run(10.0);
         assert_eq!(r.fell_at_s, None);
         assert!(
@@ -434,15 +446,17 @@ mod tests {
     #[test]
     fn compensated_stays_upright_for_10_s() {
         // The CI check that the whole chain balances: from small and large
-        // tilts, on a full, nominal and nearly empty pack. After 5 s the pitch
-        // stays within ~0.03° (steady roll) or ±0.5° (stick-slip, see below);
-        // seed 1 does the latter from 2° and at 6.4 / 8.4 V. 1° means
-        // "clearly balancing" either way.
+        // tilts, on a full, nominal and nearly empty pack. With the
+        // speed-feedback gains (D2) the robot settles near zero speed, where
+        // the wheels stick-slip: seed 1 from 2° swings up to ±1.3° in the
+        // last 5 s (`tune --check`: worst ~2°, mean 0.3° over 82 stress
+        // runs). The softer gains trade that wobble for not running away on
+        // a balance-point error. 2.5° means "clearly balancing".
         for (start, battery_v) in [(2.0, 7.4), (10.0, 7.4), (5.0, 8.4), (5.0, 6.4)] {
             let r = with_drive(start, 1, battery_v);
             assert_eq!(r.fell_at_s, None, "{start}° at {battery_v} V");
             let p = r.max_abs_pitch_deg(5.0);
-            assert!(p < 1.0, "{start}° at {battery_v} V: {p}");
+            assert!(p < 2.5, "{start}° at {battery_v} V: {p}");
         }
     }
 
@@ -535,5 +549,59 @@ mod tests {
         let new = fast_motor(Config::PROTOTYPE.gains, 20);
         assert_eq!(new.fell_at_s, None);
         assert!(new.max_abs_pitch_deg(5.0) < 3.0);
+    }
+
+    // Speed feedback (bring-up step D2).
+
+    /// From 4.5° at 7.8 V with the chip's mounting tilt `offset_deg` off the
+    /// balance point the controller assumes.
+    fn with_balance_error(gains: Gains, offset_deg: f64) -> super::Run {
+        let imu = crate::imu::ImuParams {
+            mount_tilt_deg: crate::imu::ImuParams::prototype().mount_tilt_deg + offset_deg,
+            ..crate::imu::ImuParams::prototype()
+        };
+        Sim::new(
+            crate::pendulum::Body::prototype(),
+            Motor::prototype().at_battery(7.8),
+            imu,
+            gains,
+            4.5,
+            1,
+        )
+        .unwrap()
+        .with_drive(balance_core::drive::Drive::PROTOTYPE)
+        .run(10.0)
+    }
+
+    #[test]
+    fn without_speed_feedback_a_small_balance_error_runs_away() {
+        // The second balance attempt: with a balance point off by half a
+        // degree the I term keeps adding speed (it is the only thing that
+        // knows about the speed) until the motors saturate at full speed and
+        // the robot falls. 0.25° is enough.
+        let no_kv = Gains {
+            kv: 0.0,
+            ..Config::PROTOTYPE.gains
+        };
+        for offset in [0.5, -0.5] {
+            let r = with_balance_error(no_kv, offset);
+            assert!(r.fell_at_s.is_some(), "{offset}°");
+            let v = r.last().unwrap().axle_vel_m_s.abs();
+            assert!(v > 0.35, "{offset}°: {v} m/s");
+        }
+        let r = with_balance_error(B_STEP_GAINS, 0.25);
+        assert!(r.fell_at_s.is_some());
+    }
+
+    #[test]
+    fn speed_feedback_turns_a_balance_error_into_a_steady_drift() {
+        // With kv the I term can settle: pitch + kv · speed = offset, so the
+        // robot drifts at a steady speed (~0.1 m/s per degree) and stays up.
+        for offset in [1.0, -1.0] {
+            let r = with_balance_error(Config::PROTOTYPE.gains, offset);
+            assert_eq!(r.fell_at_s, None, "{offset}°");
+            let v = r.max_abs_speed_m_s(5.0);
+            assert!(v < 0.15, "{offset}°: {v} m/s");
+        }
     }
 }

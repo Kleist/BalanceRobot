@@ -193,6 +193,7 @@ const SIGN_CHECK_GAINS: Gains = Gains {
     kp: 0.03,
     ki: 0.0,
     kd: 0.0,
+    kv: 0.0,
 };
 
 /// Which gains the controller runs with. `true`: `Config::PROTOTYPE.gains` (kp 0.12,
@@ -408,11 +409,12 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
                     gyro_pitch_deg: gyro_pitch,
                     filter_pitch_deg: filter_pitch,
                     motor_cmd,
+                    speed_est,
                 },
             duty_pct: [duty_l, duty_r],
         } => writeln!(
             line,
-            "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1},{motor_cmd:>9.3},{duty_l:>6},{duty_r:>6}",
+            "{t_us:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{pitch:>9.1},{rx:>7.2},{ry:>7.2},{rz:>7.2},{gyro_pitch:>14.1},{filter_pitch:>16.1},{motor_cmd:>9.3},{duty_l:>6},{duty_r:>6},{speed_est:>9.3}",
             a[0], a[1], a[2], g[0], g[1], g[2]
         ),
         LogMsg::Battery { battery_v, pin_mv } => {
@@ -649,7 +651,7 @@ async fn main(spawner: Spawner) {
         GYRO_RANGE.scale_factor()
     );
     println!(
-        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6}",
+        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6},{:>9}",
         "t_us",
         "ax",
         "ay",
@@ -665,7 +667,8 @@ async fn main(spawner: Spawner) {
         "filter_pitch_deg",
         "motor_cmd",
         "duty_l",
-        "duty_r"
+        "duty_r",
+        "speed_est"
     );
 
     // From here on, log lines go through the queue to the log task, which owns the async
