@@ -19,6 +19,12 @@
 //!
 //! Decoding is strict: a wrong length, an unknown version or a reserved flag bit is an
 //! error, so a garbled or foreign write is dropped instead of steering the robot.
+//!
+//! On the robot, packets arrive as BLE writes to one characteristic of a custom GATT
+//! service ([`SERVICE_UUID`], [`PACKET_UUID`]). The [`Watchdog`] turns them into the
+//! command the robot follows: the last valid packet's, or 0 once none has arrived for
+//! [`TIMEOUT_US`], after a disconnect, or while it isn't `active`. 0 means "stand still"
+//! (keep balancing), never "motors off": a balancing robot without motors falls.
 
 use crate::remote::Command;
 
@@ -26,6 +32,27 @@ use crate::remote::Command;
 pub const VERSION: u8 = 1;
 /// Length of an encoded packet in bytes.
 pub const LEN: usize = 5;
+
+/// The robot's GATT service, as written in the usual UUID notation
+/// (`55c4fb07-f880-4bd5-804a-c5eac902a078`, randomly generated). Advertised by the robot,
+/// so the remote can find it by this instead of by name.
+pub const SERVICE_UUID: u128 = 0x55c4_fb07_f880_4bd5_804a_c5ea_c902_a078;
+/// The characteristic the remote writes packets to
+/// (`b7b46705-9fb9-498c-9e95-cb4368dc792b`), in [`SERVICE_UUID`].
+pub const PACKET_UUID: u128 = 0xb7b4_6705_9fb9_498c_9e95_cb43_68dc_792b;
+
+/// A UUID's 16 bytes in the order BLE sends them: least significant byte first, the
+/// reverse of how it is written.
+#[must_use]
+pub const fn uuid_bytes(uuid: u128) -> [u8; 16] {
+    uuid.to_le_bytes()
+}
+
+/// With no valid packet for this long, the robot stops following the remote (speed and
+/// turn 0). The remote sends 20-50 packets per second, so 250 ms is 5-12 lost in a row:
+/// long enough not to trip on a short radio hiccup, short enough that a robot driving at
+/// full speed (~0.4 m/s) rolls only ~10 cm on after the link drops.
+pub const TIMEOUT_US: u64 = 250_000;
 
 /// Flag bit: both buttons held, the commands are live.
 const FLAG_ACTIVE: u8 = 0b0000_0001;
@@ -121,6 +148,68 @@ impl Packet {
     }
 }
 
+/// Turns the stream of packets into the command the robot follows, and notices when it
+/// stops. Time is passed in as microseconds since any fixed start (the firmware's
+/// `Instant`), so this stays independent of the hardware clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Watchdog {
+    timeout_us: u64,
+    /// The last valid packet and when it arrived; `None` before the first one, after a
+    /// timeout and after a disconnect.
+    last: Option<(u64, Packet)>,
+}
+
+impl Watchdog {
+    /// No packet yet, so no command.
+    #[must_use]
+    pub const fn new(timeout_us: u64) -> Self {
+        Self {
+            timeout_us,
+            last: None,
+        }
+    }
+
+    /// A valid packet arrived at `now_us`.
+    pub fn on_packet(&mut self, now_us: u64, packet: Packet) {
+        self.last = Some((now_us, packet));
+    }
+
+    /// The remote disconnected: forget its last packet at once, without waiting for the
+    /// timeout.
+    pub fn on_disconnect(&mut self) {
+        self.last = None;
+    }
+
+    /// Checks the timeout. Returns `true` once, at the first call after the last packet
+    /// has become too old, and forgets that packet; `false` otherwise (also while there
+    /// is no packet to time out). Call it regularly to log the moment the link is lost.
+    pub fn poll(&mut self, now_us: u64) -> bool {
+        if self.live_packet(now_us).is_none() && self.last.is_some() {
+            self.last = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The last packet, if it is younger than the timeout.
+    #[must_use]
+    pub fn live_packet(&self, now_us: u64) -> Option<Packet> {
+        let (at_us, packet) = self.last?;
+        // `saturating_sub`: a timestamp from "the future" (shouldn't happen) counts as new.
+        (now_us.saturating_sub(at_us) < self.timeout_us).then_some(packet)
+    }
+
+    /// What the robot should do now: the last packet's command while it is live (0 if it
+    /// isn't `active`), otherwise 0. Checks the age itself, so it is right even if
+    /// [`poll`](Self::poll) wasn't called.
+    #[must_use]
+    pub fn command(&self, now_us: u64) -> Command {
+        self.live_packet(now_us)
+            .map_or_else(Command::default, |packet| packet.command())
+    }
+}
+
 /// −1..=1 → −127..=127, rounded to the nearest step; clamped, `NaN` → 0.
 fn to_wire(value: f32) -> i8 {
     let value = if value.is_nan() {
@@ -143,7 +232,10 @@ fn from_wire(value: i8) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, LEN, Packet, VERSION};
+    use super::{
+        DecodeError, LEN, PACKET_UUID, Packet, SERVICE_UUID, TIMEOUT_US, VERSION, Watchdog,
+        uuid_bytes,
+    };
     use crate::remote::Command;
 
     fn command(speed: f32, turn: f32) -> Command {
@@ -257,5 +349,76 @@ mod tests {
             Packet::decode(&[VERSION, 0, 0, 0, 0xFF]),
             Err(DecodeError::ReservedFlags(0xFF))
         );
+    }
+
+    #[test]
+    fn uuids_go_out_least_significant_byte_first() {
+        let bytes = uuid_bytes(SERVICE_UUID);
+        assert_eq!(bytes[0], 0x78); // last pair of "...c902a078"
+        assert_eq!(bytes[15], 0x55); // first pair of "55c4fb07-..."
+        assert_ne!(SERVICE_UUID, PACKET_UUID);
+    }
+
+    fn live(seq: u8, speed: f32) -> Packet {
+        Packet::new(seq, command(speed, 0.0), true)
+    }
+
+    #[test]
+    fn no_packet_no_command() {
+        let mut watchdog = Watchdog::new(TIMEOUT_US);
+        assert_eq!(watchdog.command(0), Command::default());
+        assert_eq!(watchdog.live_packet(0), None);
+        assert!(!watchdog.poll(1_000_000)); // nothing to time out
+    }
+
+    #[test]
+    fn follows_the_last_packet() {
+        let mut watchdog = Watchdog::new(TIMEOUT_US);
+        watchdog.on_packet(1_000, live(1, 0.5));
+        watchdog.on_packet(21_000, live(2, -0.25));
+        let got = watchdog.command(30_000);
+        assert!((got.speed + 0.25).abs() <= 0.5 / 127.0);
+        assert_eq!(watchdog.live_packet(30_000).map(|p| p.seq), Some(2));
+    }
+
+    #[test]
+    fn inactive_packet_keeps_the_link_but_gives_no_command() {
+        let mut watchdog = Watchdog::new(TIMEOUT_US);
+        watchdog.on_packet(0, Packet::new(5, command(0.9, 0.9), false));
+        assert_eq!(watchdog.command(10), Command::default());
+        assert!(watchdog.live_packet(10).is_some());
+    }
+
+    #[test]
+    fn times_out_once() {
+        let mut watchdog = Watchdog::new(TIMEOUT_US);
+        watchdog.on_packet(1_000, live(1, 1.0));
+        // Just inside the timeout: still live.
+        assert!(!watchdog.poll(1_000 + TIMEOUT_US - 1));
+        assert!(watchdog.command(1_000 + TIMEOUT_US - 1).speed > 0.99);
+        // At the timeout: command 0 even before `poll` is called...
+        assert_eq!(watchdog.command(1_000 + TIMEOUT_US), Command::default());
+        // ...and `poll` reports it exactly once.
+        assert!(watchdog.poll(1_000 + TIMEOUT_US));
+        assert!(!watchdog.poll(1_000 + TIMEOUT_US + 50_000));
+        // A new packet brings it back.
+        watchdog.on_packet(2_000_000, live(9, 1.0));
+        assert!(watchdog.command(2_000_001).speed > 0.99);
+    }
+
+    #[test]
+    fn disconnect_stops_at_once_without_a_timeout() {
+        let mut watchdog = Watchdog::new(TIMEOUT_US);
+        watchdog.on_packet(0, live(1, 1.0));
+        watchdog.on_disconnect();
+        assert_eq!(watchdog.command(1), Command::default());
+        assert!(!watchdog.poll(1_000_000));
+    }
+
+    #[test]
+    fn a_packet_from_the_future_counts_as_new() {
+        let mut watchdog = Watchdog::new(TIMEOUT_US);
+        watchdog.on_packet(5_000, live(1, 1.0));
+        assert!(watchdog.live_packet(4_000).is_some());
     }
 }

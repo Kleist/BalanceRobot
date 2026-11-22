@@ -191,8 +191,9 @@ pub enum Experiment {
     /// The controller drives the motors with `Config::PROTOTYPE.gains` (on the floor,
     /// hand ready).
     Balance,
-    /// Like `ImuLog`, plus BLE advertising (`ble`): shows what the radio costs the loop.
-    BleAdvertise,
+    /// Like `ImuLog`, plus the BLE link to the remote (`ble`): packets are logged, not
+    /// applied.
+    BleLink,
 }
 
 impl Experiment {
@@ -202,7 +203,7 @@ impl Experiment {
     /// Whether the BLE radio runs. Only where it is being brought up, so the other
     /// experiments keep their timing.
     const fn uses_ble(self) -> bool {
-        matches!(self, Self::BleAdvertise)
+        matches!(self, Self::BleLink)
     }
 
     const fn control_drives_motors(self) -> bool {
@@ -416,7 +417,7 @@ enum LogMsg {
     ImuError(I2cError),
     /// A status line from the BLE task (`ble`), already formatted: it runs in thread
     /// mode, where formatting doesn't hold up the control loop.
-    Ble(heapless::String<64>),
+    Ble(heapless::String<96>),
 }
 
 /// Queue from the sample loop to `log_writer`. A `static` because both tasks need it and
@@ -480,7 +481,7 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
         LogMsg::MotorCmd(cmd) => writeln!(line, "# motor cmd {cmd:+.2} (both)"),
         LogMsg::MotorError(e) => writeln!(line, "# motor command failed: {e:?}"),
         LogMsg::ImuError(e) => writeln!(line, "# IMU read failed: {e:?}"),
-        LogMsg::Ble(text) => writeln!(line, "# ble: {text}"),
+        LogMsg::Ble(text) => writeln!(line, "# {text}"),
     }
 }
 

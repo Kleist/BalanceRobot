@@ -79,7 +79,7 @@ The ROM bootloader always prints on UART0 TX (GPIO21 = IN4) at reset; harmless a
   | `cargo motor-check` | both motors +0.5 / stop / −0.5 | wheels in the air |
   | `cargo sign-check` | controller with P-only gains | wheels in the air |
   | `cargo balance` | controller with the balance gains | on the floor, hand ready |
-  | `cargo ble-advertise` | IMU + controller log, plus BLE advertising | off |
+  | `cargo ble-link` | IMU + controller log, plus the BLE link to the remote (packets logged, not applied) | off |
 
   Save a log with e.g. `cargo balance | tee ../balance-4.log`. The log starts with `# experiment: ...`. Flashing needs the user in the `dialout` group. A new experiment = a variant of `Experiment` + a 20-line file in `src/bin` + an alias.
 - `remote/` (from step E1) - micro:bit v2 firmware, its own cargo workspace like `firmware/` (target `thumbv7em-none-eabihf`, `probe-rs run --chip nRF52833_xxAA` runner, `defmt` + RTT logging). `cd remote && cargo run --release` flashes and shows the log; needs `cargo install probe-rs-tools` and the probe-rs udev rule. Keeps the same lint block. Shared logic (tilt → command, packet format) lives in `balance-core`, so `balance-core` must also build for `thumbv7em-none-eabihf`.
