@@ -24,14 +24,19 @@
 //! The accelerometer answers at address 0x19. The log shows `grip on` (with the
 //! reference) and `grip off`, and five times a second
 //! `tilt: pitch .. roll .. rel .. .. -> speed .. turn ..` (attitude, relative tilt,
-//! command).
+//! command), followed by the 5-byte packet (`balance_core::link`) the robot will get
+//! and what it decodes back to. A packet is built every sample (50 per second, `seq`
+//! counting up), but not sent yet.
 
 #![no_std]
 #![no_main]
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use balance_core::remote::{self, Config, GripChange, TiltRemote};
+use balance_core::{
+    link::Packet,
+    remote::{self, Config, GripChange, TiltRemote},
+};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_nrf::{
@@ -212,6 +217,8 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
 
     let mut remote = TiltRemote::new(Config::MICROBIT);
     let mut samples: u32 = 0;
+    // Sequence number of the next packet; wraps 255 -> 0.
+    let mut seq: u8 = 0;
     defmt::info!("hold A+B to drive");
     // A `Ticker` fires at fixed times (every 20 ms after the start), unlike
     // `Timer::after`, which would add the time spent reading to each period.
@@ -246,6 +253,11 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
         let (row, col) = remote::dot(update.command);
         display.show_dot(row, col);
 
+        // The packet the robot will get (not sent yet: BLE comes in later steps).
+        let active = remote.grip().reference().is_some();
+        let packet = Packet::new(seq, update.command, active);
+        seq = seq.wrapping_add(1);
+
         if samples.is_multiple_of(LOG_EVERY_N_SAMPLES) {
             defmt::info!(
                 "tilt: pitch {=f32} roll {=f32} rel {=f32} {=f32} deg -> speed {=f32} turn {=f32}",
@@ -256,6 +268,23 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
                 update.command.speed,
                 update.command.turn
             );
+            // Decode the bytes again, as the robot will: checks the round trip on the
+            // target itself (byte order, the i8 casts).
+            let bytes = packet.encode();
+            match Packet::decode(&bytes) {
+                Ok(received) => {
+                    let command = received.command();
+                    defmt::info!(
+                        "packet {=[u8]:02x} -> seq {=u8} active {=bool} speed {=f32} turn {=f32}",
+                        bytes,
+                        received.seq,
+                        received.active,
+                        command.speed,
+                        command.turn
+                    );
+                }
+                Err(e) => defmt::error!("own packet rejected: {}", defmt::Debug2Format(&e)),
+            }
         }
     }
 }

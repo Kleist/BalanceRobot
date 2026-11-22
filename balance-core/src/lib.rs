@@ -11,6 +11,7 @@ pub mod control;
 pub mod drive;
 pub mod gyro;
 pub mod imu;
+pub mod link;
 pub mod pid;
 pub mod remote;
 pub mod safety;
