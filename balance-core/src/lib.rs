@@ -12,6 +12,7 @@ pub mod drive;
 pub mod gyro;
 pub mod imu;
 pub mod pid;
+pub mod remote;
 pub mod safety;
 
 /// Limits a motor duty command to the valid range `-1.0..=1.0`.
