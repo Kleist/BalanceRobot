@@ -18,7 +18,18 @@ publish = false
 wasm-bindgen = "0.2"
 # Typed Rust bindings for the browser APIs (DOM, canvas, Web Bluetooth, ...). Every API is
 # behind its own feature, so only the ones listed here are compiled.
-web-sys = { version = "0.3", features = ["Document", "Element", "Window"] }
+web-sys = { version = "0.3", features = [
+    "CanvasRenderingContext2d",
+    "CssStyleDeclaration",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }
+# The simulated robot (physics, IMU, motor) running the firmware's own controller from
+# balance-core. Both only need `libm` / `std`, so they compile to wasm unchanged.
+sim = { path = "../sim" }
+balance-core = { path = "../balance-core" }
 
 # Same policy as [workspace.lints] in the root Cargo.toml; keep the four in sync.
 [lints.rust]

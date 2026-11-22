@@ -63,6 +63,9 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --target wasm32-unknown-unknown --release -- -D warnings
+          # The non-browser parts (clock, the simulated robot the page shows) are plain
+          # Rust, so their tests run natively.
+          cargo test
           trunk build --release --public-url "$PUBLIC_URL"
 
       - name: Publish main to the site root
