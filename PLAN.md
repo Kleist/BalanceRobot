@@ -45,7 +45,7 @@ Goal: a robot that can be played with without fear of breaking it, with a rechar
 
 ### Robot board (group F)
 
-One two-layer board of about 80 x 60 mm, all SMD parts on the front so JLCPCB's economic assembly can place them, 18650 holders on the back. One USB-C port does charging, flashing and logging, like the dev board.
+One two-layer board of 84 x 74 mm (fixed in F1, see [`hardware/board.toml`](hardware/board.toml)), all SMD parts on the front so JLCPCB's economic assembly can place them, 18650 holders on the back. One USB-C port does charging, flashing and logging, like the dev board.
 
 Power path: USB-C 5 V → IP2326 boost charger → 2S pack (with S-8252 protection) → slide switch + P-MOSFET (+ fuse) → DRV8833 and the motors. A buck converter makes 3.3 V from the switched battery **or** from USB (diode-OR), so a robot with a flat battery can still be flashed while it charges.
 
@@ -88,7 +88,6 @@ Pin map (keeps the dev board's I2C, LED and battery pins; motor pins move off GP
 
 Having it made: KiCad with the JLCPCB fabrication plugin (Gerbers, BOM, placement). Prefer JLCPCB "basic" parts; each "extended" part type adds ~$3 setup. Roughly $80-120 for 5 assembled boards including parts and shipping to Denmark (estimate, VAT collected at checkout); fabrication 3-5 days, shipping 3-7 days. Plan for two revisions.
 
-- [ ] F1. Fix the board outline, mounting holes, USB-C and switch positions in one shared file (the contract between board and chassis)
 - [ ] F2. Schematic in KiCad; review against the datasheets (IP2326, S-8252, DRV8833, ESP32-C3-MINI-1 reference design)
 - [ ] F3. Layout: antenna keep-out, motor current paths short and away from the IMU, thermal pad vias under the DRV8833; JLCPCB DRC and part availability check
 - [ ] F4. Order Rev A (5 boards). Check: boards arrive, nothing visibly misplaced

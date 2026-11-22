@@ -108,6 +108,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  hardware:
+    name: Board contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Checks hardware/board.toml and that hardware/generated/ was regenerated from it.
+      - run: python3 hardware/board.py --check
+
   coverage:
     name: Coverage (report only)
     runs-on: ubuntu-latest

@@ -1,0 +1,227 @@
+# Robot board contract (step F1)
+#
+# The one place where the board and the chassis agree on where things are.
+# KiCad (group F) and OpenSCAD (group G) both follow this file; change it
+# here first, then run `python3 hardware/board.py` to regenerate
+# `hardware/generated/`. CI fails if the generated files are out of date.
+#
+# Coordinates: millimetres, seen from the FRONT of the board (the side with
+# the SMD parts that JLCPCB places). Origin at the bottom-left corner,
+# +x to the right, +y up (the board stands upright in the robot, so +y is
+# "up" in the robot too). Heights are measured from the board surface on
+# the side the part sits on. Every feature is a rectangle centred at (x, y)
+# of size w (along x) by h (along y), or a circle of diameter d.
+
+[board]
+width = 84.0       # along the axle
+height = 74.0      # up
+thickness = 1.6
+corner_radius = 3.0
+layers = 2
+
+# Tallest part on each side, anywhere on the board. The chassis keeps this
+# much free space in front of and behind the board.
+front_clearance = 14.0   # the 470 uF electrolytic standing up (Ø8-10 x 11.5-12.5) plus margin
+back_clearance = 19.0    # the 18650 holders (15-18 mm, sources disagree) plus margin
+
+# Four M3 holes, unplated. `keepout_d` is the copper and parts keep-out on
+# both sides (M3 washer / screw head 6 mm, plus margin), so the chassis can
+# use a standoff or heat-set insert boss up to that diameter.
+[[hole]]
+name = "H1"
+x = 4.0
+y = 4.0
+d = 3.2
+keepout_d = 7.0
+
+[[hole]]
+name = "H2"
+x = 80.0
+y = 4.0
+d = 3.2
+keepout_d = 7.0
+
+[[hole]]
+name = "H3"
+x = 4.0
+y = 70.0
+d = 3.2
+keepout_d = 7.0
+
+[[hole]]
+name = "H4"
+x = 80.0
+y = 70.0
+d = 3.2
+keepout_d = 7.0
+
+# Parts the chassis has to know about. `edge` means the part sits flush with
+# that board edge and points out of it; `opening` is the hole the chassis
+# wall needs there (w along the edge, h across the board plane, centred on
+# the part), sized for the mating plug or a finger, not for the part itself.
+# `access = "front"` means it has to be seen or reached from the front.
+
+[[part]]
+name = "battery_1"
+what = "18650 holder, lower cell (Keystone 1043 or same size, PC pins)"
+side = "back"
+x = 42.0
+y = 21.5
+w = 77.1
+h = 20.7
+height = 18.0
+note = "Cells must be removable: the chassis leaves the length plus ~10 mm to tilt a cell out, or a removable lid"
+
+[[part]]
+name = "battery_2"
+what = "18650 holder, upper cell"
+side = "back"
+x = 42.0
+y = 44.5
+w = 77.1
+h = 20.7
+height = 18.0
+
+[[part]]
+name = "usb_c"
+what = "USB-C receptacle, 16 pin, through-hole shell legs (e.g. HRO TYPE-C-31-M-12)"
+side = "front"
+x = 3.65
+y = 61.0
+w = 7.3
+h = 8.94
+height = 3.3
+edge = "left"
+opening = { w = 13.0, h = 7.5 }   # the plug's overmould, not just the metal shell
+note = "The chassis wall must back up the receptacle so the plug's force goes into the body, not the solder joints"
+
+[[part]]
+name = "power_switch"
+what = "Slide switch, right-angle, actuator out of the board edge (chosen in F2)"
+side = "front"
+x = 80.0
+y = 61.0
+w = 8.0
+h = 9.0
+height = 6.0
+edge = "right"
+opening = { w = 10.0, h = 8.0 }
+
+[[part]]
+name = "esp32_module"
+what = "ESP32-C3-MINI-1 (13.2 x 16.6 x 2.4 mm), PCB antenna at the top edge"
+side = "front"
+x = 42.0
+y = 65.7
+w = 13.2
+h = 16.6
+height = 2.4
+
+[[part]]
+name = "motor_left"
+what = "JST-XH 2-pin, vertical (B2B-XH-A), plug from the front"
+side = "front"
+x = 14.0
+y = 4.5
+w = 7.5
+h = 5.75
+height = 9.8
+access = "front"
+note = "Plug inserted from the front; leave ~15 mm above the header for fingers and the wires"
+
+[[part]]
+name = "motor_right"
+what = "JST-XH 2-pin, vertical (B2B-XH-A), plug from the front"
+side = "front"
+x = 70.0
+y = 4.5
+w = 7.5
+h = 5.75
+height = 9.8
+access = "front"
+
+[[part]]
+name = "speaker"
+what = "JST-XH 2-pin, vertical, speaker lead"
+side = "front"
+x = 32.0
+y = 4.5
+w = 7.5
+h = 5.75
+height = 9.8
+access = "front"
+
+[[part]]
+name = "bulk_cap"
+what = "470 uF 16 V electrolytic, radial, standing (Ø10 max)"
+side = "front"
+x = 52.0
+y = 8.0
+w = 10.0
+h = 10.0
+height = 13.0
+
+[[part]]
+name = "status_led"
+what = "WS2812 RGB LED (5 x 5 mm)"
+side = "front"
+x = 20.0
+y = 67.0
+w = 5.0
+h = 5.0
+height = 1.6
+access = "front"
+note = "The chassis gives a window or a thin wall to shine through"
+
+[[part]]
+name = "charge_led"
+what = "Charge LED(s), 0603"
+side = "front"
+x = 12.0
+y = 67.0
+w = 4.0
+h = 2.0
+height = 0.8
+access = "front"
+
+[[part]]
+name = "boot_button"
+what = "BOOT tactile button, SMD, top-actuated"
+side = "front"
+x = 64.0
+y = 67.0
+w = 6.0
+h = 3.5
+height = 2.5
+access = "front"
+note = "Only needed for flashing a stuck board: a 3 mm hole for a pin is enough"
+
+[[part]]
+name = "reset_button"
+what = "RESET tactile button, SMD, top-actuated"
+side = "front"
+x = 72.0
+y = 67.0
+w = 6.0
+h = 3.5
+height = 2.5
+access = "front"
+
+# Areas the chassis and the board layout both keep clear.
+[[keepout]]
+name = "antenna"
+side = "both"
+x = 42.0
+y = 71.0
+w = 13.2
+h = 6.0
+note = "No copper on either layer under the module's antenna, nothing on the back. In the chassis: no metal (screws, inserts, cells, motors) within 15 mm of this area; plastic is fine"
+
+[[keepout]]
+name = "back_top_strip"
+side = "back"
+x = 42.0
+y = 65.0
+w = 84.0
+h = 18.0
+note = "Nothing tall on the back above the cells, so the cells stay at least 10 mm from the antenna"
