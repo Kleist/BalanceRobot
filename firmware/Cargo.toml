@@ -35,7 +35,7 @@ esp-radio = { version = "=1.0.0-beta.1", features = ["esp32c3", "ble", "unstable
 esp-alloc = "0.11"
 # BLE host stack (GAP, later GATT) on top of any HCI controller. Only the peripheral role:
 # the robot advertises and gets connected to, it never scans.
-trouble-host = { version = "0.8", default-features = false, features = ["peripheral", "default-packet-pool"] }
+trouble-host = { version = "0.8", default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool"] }
 # HCI types and `ExternalController`, which drives a controller over an HCI transport.
 # 0.10 is what trouble-host 0.8 uses; its `Transport` trait (from `bt-hci-transport` 0.1) is
 # the one esp-radio's `BleConnector` implements.
