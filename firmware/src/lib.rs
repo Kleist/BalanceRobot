@@ -191,8 +191,9 @@ pub enum Experiment {
     /// The controller drives the motors with `Config::PROTOTYPE.gains` (on the floor,
     /// hand ready).
     Balance,
-    /// Like `ImuLog`, plus the BLE link to the remote (`ble`): packets are logged, not
-    /// applied.
+    /// The BLE link to the remote (`ble`): packet statistics are logged, not applied.
+    /// The IMU and the controller run as in `ImuLog` (so the loop timing is realistic),
+    /// but without the CSV lines, so the link's lines stand out.
     BleLink,
 }
 
@@ -204,6 +205,12 @@ impl Experiment {
     /// experiments keep their timing.
     const fn uses_ble(self) -> bool {
         matches!(self, Self::BleLink)
+    }
+
+    /// Whether the CSV sample lines (and their header) are logged. Not for the BLE link:
+    /// 50 lines a second would bury its once-a-second lines.
+    const fn logs_samples(self) -> bool {
+        !matches!(self, Self::BleLink)
     }
 
     const fn control_drives_motors(self) -> bool {
@@ -680,35 +687,37 @@ pub async fn run(spawner: Spawner, experiment: Experiment) {
     let GyroBias([bx, by, bz]) = bias;
     println!("# gyro bias (deg/s): x={bx:.3} y={by:.3} z={bz:.3}");
 
-    // Header lines start with '#' so a CSV parser can skip them. Columns are right-aligned
-    // to fixed widths (i16 needs 6 chars: "-32768") so the raw log is readable by eye;
-    // the padding is only spaces, so it is still valid CSV.
-    println!(
-        "# ICM-42670-P raw samples; accel {ACCEL_RANGE:?} = {} LSB/g, gyro {GYRO_RANGE:?} = {} LSB/(deg/s)",
-        ACCEL_RANGE.scale_factor(),
-        GYRO_RANGE.scale_factor()
-    );
-    println!(
-        "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6},{:>9},{:>9}",
-        "t_us",
-        "ax",
-        "ay",
-        "az",
-        "gx",
-        "gy",
-        "gz",
-        "pitch_deg",
-        "gx_dps",
-        "gy_dps",
-        "gz_dps",
-        "gyro_pitch_deg",
-        "filter_pitch_deg",
-        "motor_cmd",
-        "duty_l",
-        "duty_r",
-        "speed_est",
-        "pos_est"
-    );
+    if experiment.logs_samples() {
+        // Header lines start with '#' so a CSV parser can skip them. Columns are
+        // right-aligned to fixed widths (i16 needs 6 chars: "-32768") so the raw log is
+        // readable by eye; the padding is only spaces, so it is still valid CSV.
+        println!(
+            "# ICM-42670-P raw samples; accel {ACCEL_RANGE:?} = {} LSB/g, gyro {GYRO_RANGE:?} = {} LSB/(deg/s)",
+            ACCEL_RANGE.scale_factor(),
+            GYRO_RANGE.scale_factor()
+        );
+        println!(
+            "{:>10},{:>6},{:>6},{:>6},{:>6},{:>6},{:>6},{:>9},{:>7},{:>7},{:>7},{:>14},{:>16},{:>9},{:>6},{:>6},{:>9},{:>9}",
+            "t_us",
+            "ax",
+            "ay",
+            "az",
+            "gx",
+            "gy",
+            "gz",
+            "pitch_deg",
+            "gx_dps",
+            "gy_dps",
+            "gz_dps",
+            "gyro_pitch_deg",
+            "filter_pitch_deg",
+            "motor_cmd",
+            "duty_l",
+            "duty_r",
+            "speed_est",
+            "pos_est"
+        );
+    }
 
     if experiment.uses_ble() {
         // The BLE controller allocates its buffers at runtime, so it needs a heap: 64 KiB
@@ -1021,7 +1030,9 @@ async fn control_loop(parts: ControlParts) {
                 if !allowed {
                     controller.reset_pid();
                 }
-                if motor_step == Some(TestStep::Done) && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
+                if experiment.logs_samples()
+                    && motor_step == Some(TestStep::Done)
+                    && sample.is_multiple_of(LOG_EVERY_N_SAMPLES)
                 {
                     log(
                         &mut times,

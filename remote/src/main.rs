@@ -24,10 +24,10 @@
 //! The LSM303AGR (accelerometer + magnetometer) sits on the micro:bit's internal I2C bus
 //! (SCL P0.08, SDA P0.16, pull-ups on the board), separate from the edge connector's.
 //! The accelerometer answers at address 0x19. The log shows `grip on` (with the
-//! reference) and `grip off`, and five times a second
-//! `tilt: pitch .. roll .. rel .. .. -> speed .. turn ..` (attitude, relative tilt,
-//! command), followed by the 5-byte packet the robot gets and what it decodes back to.
-//! A packet is built and sent every sample (50 per second, `seq` counting up).
+//! reference) and `grip off`, and while the grip is held, five times a second
+//! `tilt: pitch .. roll .. rel .. .. -> speed .. turn .. (seq ..)` (attitude, relative
+//! tilt, command, packet number). A packet is built and sent every sample (50 per
+//! second, `seq` counting up).
 //!
 //! Interrupt priorities: MPSL (under the BLE controller) owns priority 0 for the radio's
 //! timing and uses 4 for its low-priority work; everything else here runs at 2, so it
@@ -303,33 +303,19 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
         ble::send(packet);
         seq = seq.wrapping_add(1);
 
-        if samples.is_multiple_of(LOG_EVERY_N_SAMPLES) {
+        // Only while the grip is held: otherwise the command is 0 anyway, and the BLE
+        // lines (`packets/s`) should stand out.
+        if active && samples.is_multiple_of(LOG_EVERY_N_SAMPLES) {
             defmt::info!(
-                "tilt: pitch {=f32} roll {=f32} rel {=f32} {=f32} deg -> speed {=f32} turn {=f32}",
+                "tilt: pitch {=f32} roll {=f32} rel {=f32} {=f32} deg -> speed {=f32} turn {=f32} (seq {=u8})",
                 update.attitude.pitch_deg,
                 update.attitude.roll_deg,
                 update.relative.pitch_deg,
                 update.relative.roll_deg,
                 update.command.speed,
-                update.command.turn
+                update.command.turn,
+                packet.seq
             );
-            // Decode the bytes again, as the robot will: checks the round trip on the
-            // target itself (byte order, the i8 casts).
-            let bytes = packet.encode();
-            match Packet::decode(&bytes) {
-                Ok(received) => {
-                    let command = received.command();
-                    defmt::info!(
-                        "packet {=[u8]:02x} -> seq {=u8} active {=bool} speed {=f32} turn {=f32}",
-                        bytes,
-                        received.seq,
-                        received.active,
-                        command.speed,
-                        command.turn
-                    );
-                }
-                Err(e) => defmt::error!("own packet rejected: {}", defmt::Debug2Format(&e)),
-            }
         }
     }
 }
