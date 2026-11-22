@@ -10,9 +10,14 @@
 //! - **roll**: lowering the right (button B) side, like turning a steering wheel
 //!   clockwise. 0° level.
 //!
-//! [`TiltRemote`] low-pass filters the readings, measures both angles against a zero
-//! attitude (where you hold it when you start) and maps each offset onto −1..=1 with a
-//! dead zone and a full-scale angle ([`shape`]): more pitch than the zero = forward
+//! You drive only while holding **both buttons** (A+B), the [`Grip`]: the attitude at
+//! the moment both are down becomes the reference, and the command comes from the tilt
+//! relative to it. Let go of either button and the command is 0 whatever the tilt;
+//! the next press captures a new reference, so you can start from any comfortable angle.
+//!
+//! [`TiltRemote`] low-pass filters the readings, runs the grip and maps each relative
+//! angle onto −1..=1 with a dead zone and a full-scale angle ([`shape`]): more pitch
+//! than the reference = forward
 //! (`speed` > 0), right side lower = turn right (`turn` > 0, the robot's convention:
 //! `left = cmd + turn`, `right = cmd − turn`).
 
@@ -57,10 +62,10 @@ impl Attitude {
 /// Settings for [`TiltRemote`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Config {
-    /// Tilts smaller than this (from the zero attitude) give 0, so a hand that isn't
+    /// Tilts smaller than this (from the grip's reference) give 0, so a hand that isn't
     /// perfectly still doesn't make the robot creep.
     pub dead_zone_deg: f32,
-    /// Tilt (from the zero attitude) that gives full command, ±1.
+    /// Tilt (from the grip's reference) that gives full command, ±1.
     pub full_scale_deg: f32,
     /// Time constant of the low-pass filter on the accelerometer reading: smooths
     /// hand tremor and sensor noise, at the cost of this much lag.
@@ -98,44 +103,128 @@ pub fn shape(offset_deg: f32, dead_zone_deg: f32, full_scale_deg: f32) -> f32 {
     (past_dead_zone / span).min(1.0).copysign(offset_deg)
 }
 
-/// Wraps an angle difference into −180..=180, so a zero near ±180° doesn't make a small
-/// tilt look like a full turn.
+/// Wraps an angle difference into −180..=180, so a reference near ±180° doesn't make a
+/// small tilt look like a full turn.
 fn wrap_deg(deg: f32) -> f32 {
     deg - 360.0 * libm::roundf(deg / 360.0)
 }
 
-/// Filters accelerometer readings and turns them into a [`Command`] relative to a zero
-/// attitude.
-#[derive(Debug, Clone)]
-pub struct TiltRemote {
-    config: Config,
-    /// Low-pass filtered reading; `None` until the first sample.
-    filtered: Option<[f32; 3]>,
-    /// Attitude that gives a zero command; upright and level until set.
-    zero: Attitude,
+/// What a [`Grip::step`] changed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GripChange {
+    /// Same as before: still held, or still not held.
+    None,
+    /// Both buttons just went down; the attitude at that moment is the new reference.
+    On {
+        /// The captured reference.
+        reference: Attitude,
+    },
+    /// At least one button was just let go.
+    Off,
 }
 
-impl TiltRemote {
-    /// A remote with no reading yet and the zero at upright and level.
+/// "Hold A+B to drive": tracks whether both buttons are held and the attitude at the
+/// moment they were pressed (the reference).
+///
+/// The angles are plain differences from the reference. That is exact for a pure pitch
+/// or a pure roll and close enough for the ±30° a hand tilts the remote.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Grip {
+    /// `Some` while both buttons are held.
+    reference: Option<Attitude>,
+}
+
+impl Grip {
+    /// Not held.
     #[must_use]
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            filtered: None,
-            zero: Attitude {
+    pub const fn new() -> Self {
+        Self { reference: None }
+    }
+
+    /// Updates the grip with whether both (debounced) buttons are held now and the
+    /// current attitude. On the press it captures `attitude` as the reference.
+    pub fn step(&mut self, both_held: bool, attitude: Attitude) -> GripChange {
+        match (self.reference, both_held) {
+            (None, true) => {
+                self.reference = Some(attitude);
+                GripChange::On {
+                    reference: attitude,
+                }
+            }
+            (Some(_), false) => {
+                self.reference = None;
+                GripChange::Off
+            }
+            _ => GripChange::None,
+        }
+    }
+
+    /// The reference while held, `None` otherwise.
+    #[must_use]
+    pub fn reference(&self) -> Option<Attitude> {
+        self.reference
+    }
+
+    /// `attitude` relative to the reference while held (pitch wrapped to ±180°);
+    /// 0° for both when not held.
+    #[must_use]
+    pub fn relative(&self, attitude: Attitude) -> Attitude {
+        match self.reference {
+            Some(reference) => Attitude {
+                pitch_deg: wrap_deg(attitude.pitch_deg - reference.pitch_deg),
+                roll_deg: attitude.roll_deg - reference.roll_deg,
+            },
+            None => Attitude {
                 pitch_deg: 0.0,
                 roll_deg: 0.0,
             },
         }
     }
+}
+
+/// What [`TiltRemote::step`] produced from one reading.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Update {
+    /// The filtered attitude.
+    pub attitude: Attitude,
+    /// The tilt relative to the grip's reference; 0 when not held.
+    pub relative: Attitude,
+    /// The command from `relative`; 0 when not held.
+    pub command: Command,
+    /// Whether the grip just started or ended.
+    pub grip: GripChange,
+}
+
+/// Filters accelerometer readings, runs the [`Grip`] and turns the relative tilt into a
+/// [`Command`].
+#[derive(Debug, Clone)]
+pub struct TiltRemote {
+    config: Config,
+    /// Low-pass filtered reading; `None` until the first sample.
+    filtered: Option<[f32; 3]>,
+    grip: Grip,
+}
+
+impl TiltRemote {
+    /// A remote with no reading yet, not gripped.
+    #[must_use]
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            filtered: None,
+            grip: Grip::new(),
+        }
+    }
 
     /// Feeds one accelerometer reading (sensor axes, any unit) taken `dt_s` after the
-    /// previous one and returns the command for the filtered attitude.
+    /// previous one, and whether both buttons are held.
     ///
     /// The filter is first-order: each reading moves the estimate by
     /// `dt / (tau + dt)` of the way towards it, so after a step it covers ~63 % in
-    /// `tau`. The first reading is taken as it is.
-    pub fn step(&mut self, accel: [f32; 3], dt_s: f32) -> Command {
+    /// `tau`. The first reading is taken as it is. It filters the reading, not the
+    /// command, so the reference a press captures is already smoothed, and letting go
+    /// drops the command to 0 at once (nothing to reset).
+    pub fn step(&mut self, accel: [f32; 3], dt_s: f32, both_held: bool) -> Update {
         let filtered = match self.filtered {
             None => accel,
             Some(previous) => {
@@ -144,52 +233,29 @@ impl TiltRemote {
             }
         };
         self.filtered = Some(filtered);
-        self.command()
-    }
-
-    /// The filtered attitude, or `None` before the first reading.
-    #[must_use]
-    pub fn attitude(&self) -> Option<Attitude> {
-        self.filtered.map(Attitude::from_accel)
-    }
-
-    /// Makes the current filtered attitude the zero point. Does nothing before the
-    /// first reading.
-    pub fn capture_zero(&mut self) {
-        if let Some(attitude) = self.attitude() {
-            self.zero = attitude;
-        }
-    }
-
-    /// The zero attitude.
-    #[must_use]
-    pub fn zero(&self) -> Attitude {
-        self.zero
-    }
-
-    /// The command for the filtered attitude; 0 before the first reading.
-    #[must_use]
-    pub fn command(&self) -> Command {
-        let Some(attitude) = self.attitude() else {
-            return Command::default();
-        };
+        let attitude = Attitude::from_accel(filtered);
+        let grip = self.grip.step(both_held, attitude);
+        let relative = self.grip.relative(attitude);
         let Config {
             dead_zone_deg,
             full_scale_deg,
             ..
         } = self.config;
-        Command {
-            speed: shape(
-                wrap_deg(attitude.pitch_deg - self.zero.pitch_deg),
-                dead_zone_deg,
-                full_scale_deg,
-            ),
-            turn: shape(
-                attitude.roll_deg - self.zero.roll_deg,
-                dead_zone_deg,
-                full_scale_deg,
-            ),
+        Update {
+            attitude,
+            relative,
+            command: Command {
+                speed: shape(relative.pitch_deg, dead_zone_deg, full_scale_deg),
+                turn: shape(relative.roll_deg, dead_zone_deg, full_scale_deg),
+            },
+            grip,
         }
+    }
+
+    /// The grip (held or not, and its reference).
+    #[must_use]
+    pub fn grip(&self) -> &Grip {
+        &self.grip
     }
 }
 
@@ -220,7 +286,9 @@ fn led_index(value: f32) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attitude, Command, Config, TiltRemote, dot, shape, wrap_deg};
+    use super::{
+        Attitude, Command, Config, Grip, GripChange, TiltRemote, Update, dot, shape, wrap_deg,
+    };
 
     /// A 1000 mg reading for the micro:bit held at `pitch` (top tipped away) and
     /// `roll` (right side lower), both in degrees. Pitch first, then roll about the
@@ -299,71 +367,146 @@ mod tests {
         assert_close(wrap_deg(-350.0), 10.0);
     }
 
-    /// A remote that has settled at `pitch` / `roll` and captured that as its zero.
-    fn zeroed_at(pitch: f32, roll: f32) -> TiltRemote {
-        let mut remote = TiltRemote::new(Config::MICROBIT);
-        remote.step(reading(pitch, roll), 0.02);
-        remote.capture_zero();
-        remote
-    }
-
-    /// Feeds the same reading for 2 s (20 filter time constants) and returns the
-    /// settled command.
-    fn settle(remote: &mut TiltRemote, pitch: f32, roll: f32) -> Command {
-        let mut command = Command::default();
-        for _ in 0..100 {
-            command = remote.step(reading(pitch, roll), 0.02);
+    fn attitude(pitch_deg: f32, roll_deg: f32) -> Attitude {
+        Attitude {
+            pitch_deg,
+            roll_deg,
         }
-        command
     }
 
     #[test]
-    fn zero_attitude_gives_no_command() {
-        let mut remote = zeroed_at(45.0, 0.0);
-        assert_eq!(settle(&mut remote, 45.0, 0.0), Command::default());
-        assert_eq!(settle(&mut remote, 49.0, -4.0), Command::default());
+    fn grip_captures_the_reference_on_the_press() {
+        let mut grip = Grip::new();
+        assert_eq!(grip.step(false, attitude(45.0, 3.0)), GripChange::None);
+        assert_eq!(grip.relative(attitude(70.0, 20.0)), attitude(0.0, 0.0));
+
+        let change = grip.step(true, attitude(45.0, 3.0));
+        assert_eq!(
+            change,
+            GripChange::On {
+                reference: attitude(45.0, 3.0)
+            }
+        );
+        assert_eq!(grip.relative(attitude(45.0, 3.0)), attitude(0.0, 0.0));
+
+        // Held: the reference stays, the relative tilt follows.
+        assert_eq!(grip.step(true, attitude(60.0, -7.0)), GripChange::None);
+        assert_eq!(grip.relative(attitude(60.0, -7.0)), attitude(15.0, -10.0));
+    }
+
+    #[test]
+    fn letting_go_reads_zero_and_the_next_press_rezeros() {
+        let mut grip = Grip::new();
+        grip.step(true, attitude(45.0, 0.0));
+        assert_eq!(grip.step(false, attitude(80.0, 30.0)), GripChange::Off);
+        assert_eq!(grip.relative(attitude(80.0, 30.0)), attitude(0.0, 0.0));
+        assert_eq!(grip.reference(), None);
+
+        grip.step(true, attitude(10.0, -5.0));
+        assert_eq!(grip.reference(), Some(attitude(10.0, -5.0)));
+        assert_eq!(grip.relative(attitude(20.0, -5.0)), attitude(10.0, 0.0));
+    }
+
+    #[test]
+    fn grip_wraps_pitch_across_180() {
+        let mut grip = Grip::new();
+        grip.step(true, attitude(175.0, 0.0));
+        assert_close(grip.relative(attitude(-175.0, 0.0)).pitch_deg, 10.0);
+    }
+
+    /// Feeds the same reading for 2 s (20 filter time constants) and returns the
+    /// last update.
+    fn settle(remote: &mut TiltRemote, pitch: f32, roll: f32, held: bool) -> Update {
+        let mut update = remote.step(reading(pitch, roll), 0.02, held);
+        for _ in 0..100 {
+            update = remote.step(reading(pitch, roll), 0.02, held);
+        }
+        update
+    }
+
+    /// A remote that has settled at `pitch` / `roll` and then gripped there.
+    fn gripped_at(pitch: f32, roll: f32) -> TiltRemote {
+        let mut remote = TiltRemote::new(Config::MICROBIT);
+        settle(&mut remote, pitch, roll, false);
+        remote.step(reading(pitch, roll), 0.02, true);
+        remote
+    }
+
+    #[test]
+    fn not_gripped_gives_no_command() {
+        let mut remote = TiltRemote::new(Config::MICROBIT);
+        let update = settle(&mut remote, 80.0, 30.0, false);
+        assert_eq!(update.command, Command::default());
+        assert_eq!(update.grip, GripChange::None);
+        assert_close(update.attitude.pitch_deg, 80.0);
+    }
+
+    #[test]
+    fn the_reference_gives_no_command() {
+        let mut remote = gripped_at(45.0, 0.0);
+        assert_eq!(
+            settle(&mut remote, 45.0, 0.0, true).command,
+            Command::default()
+        );
+        assert_eq!(
+            settle(&mut remote, 49.0, -4.0, true).command,
+            Command::default()
+        );
     }
 
     #[test]
     fn tipping_further_forward_drives_forward() {
-        let mut remote = zeroed_at(45.0, 0.0);
-        let command = settle(&mut remote, 45.0 + 17.5, 0.0);
+        let mut remote = gripped_at(45.0, 0.0);
+        let command = settle(&mut remote, 45.0 + 17.5, 0.0, true).command;
         assert_close(command.speed, 0.5);
         assert_close(command.turn, 0.0);
-        assert_close(settle(&mut remote, 10.0, 0.0).speed, -1.0);
+        assert_close(settle(&mut remote, 10.0, 0.0, true).command.speed, -1.0);
     }
 
     #[test]
     fn lowering_the_right_side_turns_right() {
-        let mut remote = zeroed_at(45.0, 0.0);
-        let command = settle(&mut remote, 45.0, 17.5);
+        let mut remote = gripped_at(45.0, 0.0);
+        let command = settle(&mut remote, 45.0, 17.5, true).command;
         assert_close(command.turn, 0.5);
         assert_close(command.speed, 0.0);
-        assert_close(settle(&mut remote, 45.0, -40.0).turn, -1.0);
+        assert_close(settle(&mut remote, 45.0, -40.0, true).command.turn, -1.0);
+    }
+
+    #[test]
+    fn letting_go_drops_the_command_at_once() {
+        let mut remote = gripped_at(45.0, 0.0);
+        settle(&mut remote, 80.0, 0.0, true);
+        let update = remote.step(reading(80.0, 0.0), 0.02, false);
+        assert_eq!(update.grip, GripChange::Off);
+        assert_eq!(update.command, Command::default());
+        assert!(remote.grip().reference().is_none());
+    }
+
+    #[test]
+    fn the_reference_is_the_filtered_attitude() {
+        // Settled upright, then a jolt on the press: the reference only moves by the
+        // filter's share of the jolt (k = 0.02 / 0.12).
+        let mut remote = TiltRemote::new(Config::MICROBIT);
+        settle(&mut remote, 0.0, 0.0, false);
+        let update = remote.step(reading(60.0, 0.0), 0.02, true);
+        let GripChange::On { reference } = update.grip else {
+            panic!("expected the grip to start, got {:?}", update.grip);
+        };
+        assert!(reference.pitch_deg > 0.0 && reference.pitch_deg < 15.0);
     }
 
     #[test]
     fn filter_reaches_63_percent_after_tau() {
-        let mut remote = zeroed_at(0.0, 0.0);
+        let mut remote = TiltRemote::new(Config::MICROBIT);
+        remote.step(reading(0.0, 0.0), 0.02, false);
         // Step from upright to full forward along Z: 5 samples of 20 ms = tau.
-        for _ in 0..5 {
-            remote.step([0.0, -1000.0, -1000.0], 0.02);
+        let mut update = remote.step([0.0, -1000.0, -1000.0], 0.02, false);
+        for _ in 0..4 {
+            update = remote.step([0.0, -1000.0, -1000.0], 0.02, false);
         }
-        let Some(attitude) = remote.attitude() else {
-            panic!("no attitude after five readings");
-        };
         // Filtered az ≈ −1000 · (1 − (1 − 0.02/0.12)^5) ≈ −599, ay stays −1000.
         let expected = libm::atan2f(599.0, 1000.0).to_degrees();
-        assert!((attitude.pitch_deg - expected).abs() < 0.5);
-    }
-
-    #[test]
-    fn no_reading_no_command() {
-        let mut remote = TiltRemote::new(Config::MICROBIT);
-        assert_eq!(remote.command(), Command::default());
-        assert!(remote.attitude().is_none());
-        remote.capture_zero(); // must not panic or change the zero
-        assert_close(remote.zero().pitch_deg, 0.0);
+        assert!((update.attitude.pitch_deg - expected).abs() < 0.5);
     }
 
     #[test]
