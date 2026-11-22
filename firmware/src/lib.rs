@@ -96,6 +96,8 @@ use esp_rtos::embassy::InterruptExecutor;
 use icm42670::{AccelOdr, AccelRange, Address, GyroOdr, GyroRange, Icm42670, prelude::*};
 use static_cell::StaticCell;
 
+mod ble;
+
 /// ±4 g: a balancing robot stays well below that, and it keeps 8192 LSB per g.
 const ACCEL_RANGE: AccelRange = AccelRange::G4;
 /// ±500 °/s: fast enough for a falling robot, 65.5 LSB per °/s.
@@ -189,12 +191,20 @@ pub enum Experiment {
     /// The controller drives the motors with `Config::PROTOTYPE.gains` (on the floor,
     /// hand ready).
     Balance,
+    /// Like `ImuLog`, plus BLE advertising (`ble`): shows what the radio costs the loop.
+    BleAdvertise,
 }
 
 impl Experiment {
     /// Whether the controller's command is applied to the motors. Only in the sign check
     /// and the balance attempt, so any other experiment never drives the wheels from the
     /// controller by surprise.
+    /// Whether the BLE radio runs. Only where it is being brought up, so the other
+    /// experiments keep their timing.
+    const fn uses_ble(self) -> bool {
+        matches!(self, Self::BleAdvertise)
+    }
+
     const fn control_drives_motors(self) -> bool {
         matches!(self, Self::SignCheck | Self::Balance)
     }
@@ -404,6 +414,9 @@ enum LogMsg {
     /// PWM frequency in Hz, logged once at the start.
     PwmFrequency(u32),
     ImuError(I2cError),
+    /// A status line from the BLE task (`ble`), already formatted: it runs in thread
+    /// mode, where formatting doesn't hold up the control loop.
+    Ble(heapless::String<64>),
 }
 
 /// Queue from the sample loop to `log_writer`. A `static` because both tasks need it and
@@ -467,6 +480,7 @@ fn format_msg(line: &mut heapless::String<192>, msg: &LogMsg) -> core::fmt::Resu
         LogMsg::MotorCmd(cmd) => writeln!(line, "# motor cmd {cmd:+.2} (both)"),
         LogMsg::MotorError(e) => writeln!(line, "# motor command failed: {e:?}"),
         LogMsg::ImuError(e) => writeln!(line, "# IMU read failed: {e:?}"),
+        LogMsg::Ble(text) => writeln!(line, "# ble: {text}"),
     }
 }
 
@@ -694,6 +708,15 @@ pub async fn run(spawner: Spawner, experiment: Experiment) {
         "speed_est",
         "pos_est"
     );
+
+    if experiment.uses_ble() {
+        // The BLE controller allocates its buffers at runtime, so it needs a heap: 64 KiB
+        // of the RAM the ROM bootloader used ("reclaimed": free once the app runs) and
+        // 36 KiB of normal RAM, the sizes esp-radio's docs start from.
+        esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
+        esp_alloc::heap_allocator!(size: 36 * 1024);
+        ble::start(spawner, peripherals.BT);
+    }
 
     // From here on, log lines go through the queue to the log task, which owns the async
     // USB-Serial-JTAG driver. (`println!` writes the same hardware directly; it is only
