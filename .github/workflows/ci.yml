@@ -46,13 +46,14 @@ jobs:
       - run: cargo test --workspace
 
   no-std:
-    name: no_std build (ESP32-C3 target)
+    name: no_std build (ESP32-C3 and micro:bit targets)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p balance-core --target riscv32imc-unknown-none-elf
+      - run: cargo build -p balance-core --target thumbv7em-none-eabihf
 
   firmware:
     name: Firmware (ESP32-C3)

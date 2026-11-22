@@ -44,6 +44,9 @@ lsm303agr = { version = "1.1", features = ["async"] }
 # `StaticCell`: hands out a `&'static mut` to a value once, at runtime, without `unsafe`
 # (the I2C driver's RAM buffer must live as long as the driver).
 static_cell = "2"
+# Our own hardware-independent logic (tilt -> command, later the packet format): unit-tested
+# on the host in the root workspace, compiled into the remote from source here.
+balance-core = { path = "../balance-core" }
 
 # Same policy as [workspace.lints] in the root Cargo.toml; keep the three in sync.
 [lints.rust]
