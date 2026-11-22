@@ -30,7 +30,7 @@
 //! whenever the command leaves 0, changes direction, or rises out of a small
 //! "standing" range) didn't remove the remaining stick-slip, and mapping onto
 //! a higher offset (12-15 % instead of the 8 % stop duty) made it worse. See
-//! the B2 step in CLAUDE.md for the numbers.
+//! the B2 step in HISTORY.md for the numbers.
 //!
 //! # Battery voltage
 //!
