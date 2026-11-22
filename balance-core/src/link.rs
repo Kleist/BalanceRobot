@@ -240,6 +240,74 @@ impl Watchdog {
     }
 }
 
+/// Counts the packets that arrive, for a once-a-second line in the robot's log: how
+/// many came, how many the remote numbered but never arrived (gaps in `seq`), and the
+/// longest time between two. Time in microseconds, as for [`Watchdog`].
+///
+/// A lost packet shows up as a jump in `seq`: from 7 to 10 means 8 and 9 are missing.
+/// BLE itself retransmits until a packet gets through, so within one connection a gap
+/// means the remote skipped samples (it sends only the newest when the radio falls
+/// behind), not radio loss. Radio loss shows up as long gaps instead. The same `seq`
+/// twice would count as 255 lost; the remote never sends that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LinkStats {
+    /// Arrival time and `seq` of the last packet; `None` before the first and after a
+    /// disconnect.
+    last: Option<(u64, u8)>,
+    summary: LinkSummary,
+}
+
+/// What [`LinkStats::take`] reports, since the previous `take`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LinkSummary {
+    /// Packets that arrived.
+    pub received: u32,
+    /// Packets missing between them, from the `seq` gaps.
+    pub lost: u32,
+    /// Longest time between two packets, in µs (0 with fewer than two).
+    pub longest_gap_us: u64,
+}
+
+impl LinkStats {
+    /// Nothing counted yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            last: None,
+            summary: LinkSummary {
+                received: 0,
+                lost: 0,
+                longest_gap_us: 0,
+            },
+        }
+    }
+
+    /// A valid packet numbered `seq` arrived at `now_us`.
+    pub fn on_packet(&mut self, now_us: u64, seq: u8) {
+        if let Some((at_us, last_seq)) = self.last {
+            // Wrapping: from 255 to 0 is the next one, nothing lost.
+            let missing = seq.wrapping_sub(last_seq).wrapping_sub(1);
+            self.summary.lost += u32::from(missing);
+            let gap = now_us.saturating_sub(at_us);
+            self.summary.longest_gap_us = self.summary.longest_gap_us.max(gap);
+        }
+        self.last = Some((now_us, seq));
+        self.summary.received += 1;
+    }
+
+    /// The remote disconnected: the next packet starts afresh, so neither the time nor
+    /// the `seq` jump across the reconnect counts.
+    pub fn on_disconnect(&mut self) {
+        self.last = None;
+    }
+
+    /// The counts since the last call, which start again from 0. The last packet is
+    /// kept, so a gap across two reports still counts (in the second).
+    pub fn take(&mut self) -> LinkSummary {
+        core::mem::take(&mut self.summary)
+    }
+}
+
 /// −1..=1 → −127..=127, rounded to the nearest step; clamped, `NaN` → 0.
 fn to_wire(value: f32) -> i8 {
     let value = if value.is_nan() {
@@ -263,8 +331,8 @@ fn from_wire(value: i8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DecodeError, LEN, PACKET_UUID, Packet, SERVICE_UUID, TIMEOUT_US, VERSION, Watchdog,
-        advertises_service, uuid_bytes,
+        DecodeError, LEN, LinkStats, LinkSummary, PACKET_UUID, Packet, SERVICE_UUID, TIMEOUT_US,
+        VERSION, Watchdog, advertises_service, uuid_bytes,
     };
     use crate::remote::Command;
 
@@ -514,5 +582,68 @@ mod tests {
         let mut watchdog = Watchdog::new(TIMEOUT_US);
         watchdog.on_packet(5_000, live(1, 1.0));
         assert!(watchdog.live_packet(4_000).is_some());
+    }
+
+    #[test]
+    fn stats_count_packets_and_the_longest_gap() {
+        let mut stats = LinkStats::new();
+        stats.on_packet(1_000, 10);
+        stats.on_packet(21_000, 11);
+        stats.on_packet(61_000, 12);
+        assert_eq!(
+            stats.take(),
+            LinkSummary {
+                received: 3,
+                lost: 0,
+                longest_gap_us: 40_000
+            }
+        );
+    }
+
+    #[test]
+    fn stats_count_seq_gaps_as_lost_and_wrap() {
+        let mut stats = LinkStats::new();
+        stats.on_packet(0, 7);
+        stats.on_packet(20, 10); // 8 and 9 missing
+        stats.on_packet(40, 255);
+        stats.on_packet(60, 0); // 255 -> 0 is the next one
+        stats.on_packet(80, 2); // 1 missing
+        let summary = stats.take();
+        assert_eq!(summary.received, 5);
+        assert_eq!(summary.lost, 2 + 244 + 1);
+    }
+
+    #[test]
+    fn take_starts_again_but_a_gap_across_two_reports_counts() {
+        let mut stats = LinkStats::new();
+        stats.on_packet(0, 1);
+        stats.on_packet(20_000, 2);
+        let _ = stats.take();
+        assert_eq!(stats.take(), LinkSummary::default());
+        stats.on_packet(500_000, 4);
+        assert_eq!(
+            stats.take(),
+            LinkSummary {
+                received: 1,
+                lost: 1,
+                longest_gap_us: 480_000
+            }
+        );
+    }
+
+    #[test]
+    fn stats_ignore_the_jump_across_a_reconnect() {
+        let mut stats = LinkStats::new();
+        stats.on_packet(0, 100);
+        stats.on_disconnect();
+        stats.on_packet(5_000_000, 3);
+        assert_eq!(
+            stats.take(),
+            LinkSummary {
+                received: 2,
+                lost: 0,
+                longest_gap_us: 0
+            }
+        );
     }
 }

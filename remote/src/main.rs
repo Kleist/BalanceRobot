@@ -1,8 +1,8 @@
 //! BBC micro:bit v2 tilt remote for the balance robot. So far: the accelerometer is read
 //! at 50 Hz and turned into a speed / turn command (`balance_core::remote`), which the
-//! 5x5 LED matrix shows as one dot. Separately, the remote connects to the robot over BLE
-//! (`ble`) and writes a fixed packet once a second; the tilt command isn't sent yet.
-//! While not connected the dot blinks.
+//! 5x5 LED matrix shows as one dot. Every sample also becomes a packet
+//! (`balance_core::link`) that goes to the robot over BLE (`ble`). While not connected
+//! the dot blinks.
 //!
 //! Hold it upright in front of you, LEDs facing you, USB edge up, at whatever tilt you
 //! like, and press and hold **both** buttons (the grip): that attitude becomes the
@@ -26,9 +26,8 @@
 //! The accelerometer answers at address 0x19. The log shows `grip on` (with the
 //! reference) and `grip off`, and five times a second
 //! `tilt: pitch .. roll .. rel .. .. -> speed .. turn ..` (attitude, relative tilt,
-//! command), followed by the 5-byte packet (`balance_core::link`) the robot will get
-//! and what it decodes back to. A packet is built every sample (50 per second, `seq`
-//! counting up), but not sent yet.
+//! command), followed by the 5-byte packet the robot gets and what it decodes back to.
+//! A packet is built and sent every sample (50 per second, `seq` counting up).
 //!
 //! Interrupt priorities: MPSL (under the BLE controller) owns priority 0 for the radio's
 //! timing and uses 4 for its low-priority work; everything else here runs at 2, so it
@@ -299,9 +298,9 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
             display.show_dot(row, col);
         }
 
-        // The packet the robot will get (not sent yet: BLE comes in later steps).
         let active = remote.grip().reference().is_some();
         let packet = Packet::new(seq, update.command, active);
+        ble::send(packet);
         seq = seq.wrapping_add(1);
 
         if samples.is_multiple_of(LOG_EVERY_N_SAMPLES) {
