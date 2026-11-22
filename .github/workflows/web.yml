@@ -30,9 +30,13 @@ jobs:
     permissions:
       contents: write # push the built site to the gh-pages branch
       pull-requests: write # the preview link comment
-    # Every run pushes to gh-pages: one at a time, and never cancel one half-way.
+    # One run at a time per branch or PR, never cancelled half-way. Not one group for the
+    # whole repo: a group holds only one waiting run, and a newer run from another PR
+    # replaces it, so a main deploy or a preview removal could be silently dropped (that
+    # happened to PR 74's removal). Runs for different refs may push to gh-pages at the same
+    # time; the deploy actions fetch and retry when the push is rejected.
     concurrency:
-      group: gh-pages
+      group: gh-pages-${{ github.ref }}
       cancel-in-progress: false
     env:
       # Pages serves the site under /<repo name>/ (and a PR preview in its own folder below
