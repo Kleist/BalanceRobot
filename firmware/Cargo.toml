@@ -25,7 +25,23 @@ bench = false
 # LEDC (motor PWM; the ESP32-C3 has no MCPWM) and esp-rtos.
 esp-hal = { version = "1.2", features = ["esp32c3", "unstable"] }
 # Runs the Embassy executor on top of esp-hal and provides the time driver (Timer/Ticker) from a hardware timer.
-esp-rtos = { version = "0.4", features = ["esp32c3", "embassy"] }
+# `esp-radio` + `esp-alloc`: also a preemptive scheduler with threads for the radio
+# firmware (Espressif's BLE controller is a binary blob that expects an RTOS).
+esp-rtos = { version = "0.4", features = ["esp32c3", "embassy", "esp-radio", "esp-alloc"] }
+# The radio driver: Espressif's BLE controller, wrapped as an HCI transport (`BleConnector`).
+# A beta, so pinned exactly (1.0.0-beta.2 was yanked); `unstable` for the BLE driver.
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp32c3", "ble", "unstable"] }
+# Heap allocator: the BLE controller allocates its buffers at runtime.
+esp-alloc = "0.11"
+# BLE host stack (GAP, later GATT) on top of any HCI controller. Only the peripheral role:
+# the robot advertises and gets connected to, it never scans.
+trouble-host = { version = "0.8", default-features = false, features = ["peripheral", "default-packet-pool"] }
+# HCI types and `ExternalController`, which drives a controller over an HCI transport.
+# 0.10 is what trouble-host 0.8 uses; its `Transport` trait (from `bt-hci-transport` 0.1) is
+# the one esp-radio's `BleConnector` implements.
+bt-hci = "0.10"
+# `join`: runs the BLE host's runner and the advertising code side by side in one task.
+embassy-futures = "0.1"
 # Async task executor: we only use its `#[task]` macro and `Spawner`; esp-rtos supplies the executor
 # itself, so no `platform-*` / `executor-*` features here.
 embassy-executor = "0.10"
