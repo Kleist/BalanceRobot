@@ -11,9 +11,9 @@ publish = false
 [workspace]
 
 [dependencies]
-# Low-level Cortex-M access. `critical-section-single-core` provides the critical-section
-# implementation defmt-rtt needs (disable interrupts; fine on a single core).
-cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+# Low-level Cortex-M access. The critical-section implementation (which defmt-rtt and
+# embassy-sync need) comes from nrf-mpsl, see there.
+cortex-m = "0.7"
 # Startup code: vector table, copies .data / zeroes .bss, then calls our `#[entry]` fn.
 cortex-m-rt = "0.7"
 # Logging framework: the chip sends only an index into a string table plus the raw
@@ -47,6 +47,27 @@ static_cell = "2"
 # Our own hardware-independent logic (tilt -> command, later the packet format): unit-tested
 # on the host in the root workspace, compiled into the remote from source here.
 balance-core = { path = "../balance-core" }
+# BLE, three layers as on the robot (see src/ble.rs): Nordic's SoftDevice Controller (a
+# closed-source link-layer library, linked in as a static library) with the
+# Multiprotocol Service Layer under it (MPSL: radio timing, clocks, the high-priority
+# interrupts), wrapped by `nrf-sdc` / `nrf-mpsl`; `trouble-host` on top, as on the robot.
+# `multirole` (= `central` + `peripheral`): the SoftDevice Controller comes as three
+# libraries. We only need the central role (scan and connect; the robot is the
+# peripheral), but the `central` library lacks extended scanning, which trouble-host's
+# runner references (`LeSetExtScanEnable`), so it doesn't link. The linker keeps only
+# what is used, so the bigger library costs little flash.
+nrf-sdc = { version = "0.4", features = ["nrf52833", "multirole", "defmt"] }
+# `critical-section-impl`: MPSL's radio interrupts must run on time, so a critical section
+# (used by defmt-rtt, embassy-sync, ...) may not simply disable every interrupt, as
+# cortex-m's single-core one does. MPSL's masks all interrupts except its own three.
+nrf-mpsl = { version = "0.4", features = ["nrf52833", "defmt", "critical-section-impl"] }
+# Host: `central` (connect), `scan` (hear advertisements), `gatt` (the GATT client that
+# writes the packet characteristic). Default packet pool as on the robot.
+trouble-host = { version = "0.8", default-features = false, features = ["central", "scan", "gatt", "defmt", "default-packet-pool"] }
+# `Signal`: hands the robot's address from the scan callback to the central task.
+embassy-sync = "0.8"
+# `select`: runs the GATT client's receive loop next to the writes.
+embassy-futures = "0.1"
 
 # Same policy as [workspace.lints] in the root Cargo.toml (and firmware/, web/Cargo.toml); keep the four in sync.
 [lints.rust]

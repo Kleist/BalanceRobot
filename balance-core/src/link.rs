@@ -48,6 +48,36 @@ pub const fn uuid_bytes(uuid: u128) -> [u8; 16] {
     uuid.to_le_bytes()
 }
 
+/// AD types that carry a list of 128-bit service UUIDs: "incomplete" (more exist than
+/// fit) and "complete".
+const AD_TYPE_UUIDS_128: [u8; 2] = [0x06, 0x07];
+
+/// Whether advertising data lists the service `uuid`. Advertising data (and a scan
+/// response) is a sequence of *AD structures*: a length byte (counting the type byte and
+/// the data), a type byte, then the data. The robot puts its service UUID in a "complete
+/// list of 128-bit UUIDs" structure, so the remote can pick it out of everything it hears
+/// without connecting. Malformed data (a length running past the end) ends the search.
+#[must_use]
+pub fn advertises_service(data: &[u8], uuid: u128) -> bool {
+    let wanted = uuid_bytes(uuid);
+    let mut rest = data;
+    while let [len, tail @ ..] = rest {
+        let len = usize::from(*len);
+        if len == 0 || len > tail.len() {
+            return false; // 0 = padding up to 31 bytes; too long = malformed
+        }
+        let (structure, next) = tail.split_at(len);
+        if let [ad_type, uuids @ ..] = structure
+            && AD_TYPE_UUIDS_128.contains(ad_type)
+            && uuids.as_chunks::<16>().0.contains(&wanted)
+        {
+            return true;
+        }
+        rest = next;
+    }
+    false
+}
+
 /// With no valid packet for this long, the robot stops following the remote (speed and
 /// turn 0). The remote sends 20-50 packets per second, so 250 ms is 5-12 lost in a row:
 /// long enough not to trip on a short radio hiccup, short enough that a robot driving at
@@ -234,7 +264,7 @@ fn from_wire(value: i8) -> f32 {
 mod tests {
     use super::{
         DecodeError, LEN, PACKET_UUID, Packet, SERVICE_UUID, TIMEOUT_US, VERSION, Watchdog,
-        uuid_bytes,
+        advertises_service, uuid_bytes,
     };
     use crate::remote::Command;
 
@@ -349,6 +379,70 @@ mod tests {
             Packet::decode(&[VERSION, 0, 0, 0, 0xFF]),
             Err(DecodeError::ReservedFlags(0xFF))
         );
+    }
+
+    /// Advertising data made of `parts` in a zero-padded buffer, and how many bytes are
+    /// used. 64 bytes: a legacy advertisement holds 31, extended advertising more.
+    fn ad(parts: &[&[u8]]) -> ([u8; 64], usize) {
+        let mut bytes = [0; 64];
+        let mut len = 0;
+        for part in parts {
+            bytes[len..len + part.len()].copy_from_slice(part);
+            len += part.len();
+        }
+        (bytes, len)
+    }
+
+    /// The robot's advertising data: flags, then the complete list of 128-bit UUIDs.
+    fn robot_advertising() -> ([u8; 64], usize) {
+        // Flags: LE general discoverable, no BR/EDR.
+        ad(&[&[2, 0x01, 0x06], &[17, 0x07], &uuid_bytes(SERVICE_UUID)])
+    }
+
+    #[test]
+    fn finds_the_service_in_the_robots_advertising() {
+        let (bytes, len) = robot_advertising();
+        assert!(advertises_service(&bytes[..len], SERVICE_UUID));
+        // Zero padding after the data ends the search, it doesn't break it.
+        assert!(advertises_service(&bytes, SERVICE_UUID));
+    }
+
+    #[test]
+    fn other_uuids_and_names_dont_match() {
+        let (bytes, len) = robot_advertising();
+        assert!(!advertises_service(&bytes[..len], PACKET_UUID));
+        // The name in the scan response: complete local name "BalanceRobot".
+        let mut name = [0u8; 14];
+        name[0] = 13;
+        name[1] = 0x09;
+        name[2..].copy_from_slice(b"BalanceRobot");
+        assert!(!advertises_service(&name, SERVICE_UUID));
+        assert!(!advertises_service(&[], SERVICE_UUID));
+    }
+
+    #[test]
+    fn the_uuid_as_another_type_doesnt_count() {
+        // Same 16 bytes, but as manufacturer data (0xff), not a service list.
+        let (bytes, len) = ad(&[&[17, 0xff], &uuid_bytes(SERVICE_UUID)]);
+        assert!(!advertises_service(&bytes[..len], SERVICE_UUID));
+    }
+
+    #[test]
+    fn finds_it_among_several_uuids() {
+        // An incomplete list of two (34 bytes: only fits extended advertising).
+        let (bytes, len) = ad(&[
+            &[1 + 32, 0x06],
+            &uuid_bytes(PACKET_UUID),
+            &uuid_bytes(SERVICE_UUID),
+        ]);
+        assert!(advertises_service(&bytes[..len], SERVICE_UUID));
+    }
+
+    #[test]
+    fn a_length_past_the_end_stops_the_search() {
+        // Claims 29 bytes of UUIDs, but only 16 follow.
+        let (bytes, len) = ad(&[&[30, 0x07], &uuid_bytes(SERVICE_UUID)]);
+        assert!(!advertises_service(&bytes[..len], SERVICE_UUID));
     }
 
     #[test]

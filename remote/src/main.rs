@@ -1,6 +1,8 @@
 //! BBC micro:bit v2 tilt remote for the balance robot. So far: the accelerometer is read
 //! at 50 Hz and turned into a speed / turn command (`balance_core::remote`), which the
-//! 5x5 LED matrix shows as one dot. Nothing is sent to the robot yet.
+//! 5x5 LED matrix shows as one dot. Separately, the remote connects to the robot over BLE
+//! (`ble`) and writes a fixed packet once a second; the tilt command isn't sent yet.
+//! While not connected the dot blinks.
 //!
 //! Hold it upright in front of you, LEDs facing you, USB edge up, at whatever tilt you
 //! like, and press and hold **both** buttons (the grip): that attitude becomes the
@@ -27,6 +29,11 @@
 //! command), followed by the 5-byte packet (`balance_core::link`) the robot will get
 //! and what it decodes back to. A packet is built every sample (50 per second, `seq`
 //! counting up), but not sent yet.
+//!
+//! Interrupt priorities: MPSL (under the BLE controller) owns priority 0 for the radio's
+//! timing and uses 4 for its low-priority work; everything else here runs at 2, so it
+//! can never delay the radio. embassy-nrf drivers don't set a priority themselves, and
+//! the reset default is 0, so `main` sets each one before creating the driver.
 
 #![no_std]
 #![no_main]
@@ -42,12 +49,15 @@ use embassy_executor::Spawner;
 use embassy_nrf::{
     Peri, bind_interrupts,
     gpio::{AnyPin, Input, Level, Output, OutputDrive, Pull},
-    peripherals, twim,
+    interrupt::{self, InterruptExt, Priority},
+    peripherals, rng, twim,
 };
 use embassy_time::{Delay, Duration, Ticker, Timer};
 use lsm303agr::{AccelMode, AccelOutputDataRate, Lsm303agr};
 use panic_probe as _;
 use static_cell::StaticCell;
+
+mod ble;
 
 /// A press must stay low this long to count; filters the contact bounce of the button.
 const DEBOUNCE: Duration = Duration::from_millis(20);
@@ -58,11 +68,23 @@ const ACCEL_PERIOD: Duration = Duration::from_millis(20);
 const ACCEL_PERIOD_S: f32 = 0.02;
 /// Log one line every this many samples (5 per second).
 const LOG_EVERY_N_SAMPLES: u32 = 10;
+/// While not connected the dot blinks: on for this many samples, then off as long
+/// (0.25 s each).
+const BLINK_SAMPLES: u32 = 12;
 
-// Connects the TWISPI0 interrupt (shared by the chip's I2C and SPI peripheral 0) to
-// embassy-nrf's TWIM handler, which wakes the task waiting for a transfer to finish.
+// Connects each interrupt to its handler. TWISPI0 (shared by the chip's I2C and SPI
+// peripheral 0) and RNG: embassy-nrf's handlers, which wake the task waiting for a
+// transfer / random bytes. The rest belong to MPSL (see `ble`): EGU0_SWI0 is a software
+// interrupt for its low-priority work, CLOCK_POWER tells it when a clock has started,
+// RADIO, TIMER0 and RTC0 drive the radio's timing.
 bind_interrupts!(struct Irqs {
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
+    EGU0_SWI0 => nrf_mpsl::LowPrioInterruptHandler;
+    CLOCK_POWER => nrf_mpsl::ClockInterruptHandler;
+    RADIO => nrf_mpsl::HighPrioInterruptHandler;
+    TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
+    RTC0 => nrf_mpsl::HighPrioInterruptHandler;
 });
 
 /// Debounced state of button A / B, written by its `button` task. An atomic, so two
@@ -104,10 +126,28 @@ impl Display {
 /// `#[embassy_executor::main]` creates the executor and runs this as its first task.
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // Clocks, GPIOTE and the RTC1 time driver with default settings; returns every
-    // peripheral once, as an owned singleton.
-    let p = embassy_nrf::init(embassy_nrf::config::Config::default());
+    // Clocks, GPIOTE and the RTC1 time driver; returns every peripheral once, as an
+    // owned singleton. GPIOTE and the time driver at priority 2, below MPSL's 0.
+    let mut config = embassy_nrf::config::Config::default();
+    config.gpiote_interrupt_priority = Priority::P2;
+    config.time_interrupt_priority = Priority::P2;
+    let p = embassy_nrf::init(config);
     defmt::info!("hello from the micro:bit remote (Embassy)");
+
+    interrupt::RNG.set_priority(Priority::P2);
+    ble::start(
+        spawner,
+        ble::Hardware {
+            mpsl: nrf_mpsl::Peripherals::new(
+                p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31,
+            ),
+            sdc: nrf_sdc::Peripherals::new(
+                p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
+                p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+            ),
+            rng: p.RNG,
+        },
+    );
 
     // Pins from the micro:bit v2 schematic. All LEDs start off: rows low, columns high.
     // `.into()` turns each specific pin type (`P0_21`, ...) into the type-erased `AnyPin`,
@@ -153,6 +193,7 @@ async fn main(spawner: Spawner) {
     let mut i2c_config = twim::Config::default();
     i2c_config.frequency = twim::Frequency::K400;
     let tx_ram_buffer = I2C_TX_BUFFER.init([0; 8]);
+    interrupt::TWISPI0.set_priority(Priority::P2);
     let i2c = twim::Twim::new(p.TWISPI0, Irqs, p.P0_16, p.P0_08, i2c_config, tx_ram_buffer);
     match tilt(Lsm303agr::new_with_i2c(i2c), display) {
         Ok(task) => spawner.spawn(task),
@@ -251,7 +292,12 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
         }
 
         let (row, col) = remote::dot(update.command);
-        display.show_dot(row, col);
+        let blink_off = !ble::connected() && (samples / BLINK_SAMPLES).is_multiple_of(2);
+        if blink_off {
+            display.show_dot(usize::MAX, usize::MAX); // nothing lit
+        } else {
+            display.show_dot(row, col);
+        }
 
         // The packet the robot will get (not sent yet: BLE comes in later steps).
         let active = remote.grip().reference().is_some();
