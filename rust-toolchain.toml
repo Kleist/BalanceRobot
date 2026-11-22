@@ -3,5 +3,5 @@
 [toolchain]
 channel = "1.98"
 components = ["rustfmt", "clippy", "llvm-tools"]
-# ESP32-C3 (robot firmware) and nRF52833 (micro:bit remote).
-targets = ["riscv32imc-unknown-none-elf", "thumbv7em-none-eabihf"]
+# ESP32-C3 (robot firmware), nRF52833 (micro:bit remote) and WebAssembly (web app).
+targets = ["riscv32imc-unknown-none-elf", "thumbv7em-none-eabihf", "wasm32-unknown-unknown"]

@@ -19,6 +19,7 @@ It is a learning project: built one small, understood step at a time, with each 
 | `balance-core/` | All logic that doesn't touch hardware: filters, PID, controller, motor mapping, safety, remote and packet maths. `no_std`, unit-tested on the PC, shared by the firmware, the remote and the simulator |
 | `firmware/` | ESP32-C3 firmware (`esp-hal` + Embassy). One binary per experiment: `cargo imu-log`, `motor-check`, `sign-check`, `balance`, ... |
 | `remote/` | micro:bit v2 firmware (Embassy on nRF52833): buttons, accelerometer, tilt to command |
+| `web/` | Phone remote and browser simulator (WebAssembly, built with trunk), published at https://kleist.github.io/BalanceRobot/ |
 | `sim/` | PC simulation: pendulum physics, IMU and motor models, the closed loop, tuning and log-comparison tools |
 | `docs/wiring.md` | How the prototype is wired, pin by pin |
 | `balance-*.log` | Logs of real balance attempts, used to fit the simulation |

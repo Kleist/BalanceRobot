@@ -48,7 +48,7 @@ static_cell = "2"
 # on the host in the root workspace, compiled into the remote from source here.
 balance-core = { path = "../balance-core" }
 
-# Same policy as [workspace.lints] in the root Cargo.toml; keep the three in sync.
+# Same policy as [workspace.lints] in the root Cargo.toml (and firmware/, web/Cargo.toml); keep the four in sync.
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
