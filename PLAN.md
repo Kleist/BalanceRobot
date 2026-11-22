@@ -18,7 +18,6 @@ What is left to do, in order: the open bring-up steps on the prototype, then the
 
 ### E. micro:bit remote over BLE (in parallel with C/D; only E12 needs a balancing robot)
 
-- [ ] micro:bit as central: scan for the robot's service UUID, connect, write a fixed packet once a second; LEDs show scanning / connected. Check: the robot logs the packets; the remote reconnects after a robot reset
 - [ ] Live tilt commands at 20-50 Hz, `active` from the grip; the robot logs `active`, speed and turn (not applied yet) and packets per second. Check: commands are 0 with `active` 0 unless A+B are held; pressed at an odd angle they start at 0; rate and gaps in the log; range (walk away until it drops)
 - [ ] Steering, wheels in the air: differential turn in `balance_core::drive` (`left = cmd + turn`, `right = cmd − turn`, clamped), unit tested; the robot applies `turn`. Check: hold A+B and tilt the micro:bit left, the wheels spin opposite ways; let go and the turn part goes to 0 (with the robot held level, the wheels stop)
 - [ ] Speed setpoint, simulation first: target speed in `Controller` (P/I on `pitch + kv·(speed_est − target)`, rate-limited); sim example stepping the target 0 → 0.2 → 0. Check in sim: stays up and follows the target
