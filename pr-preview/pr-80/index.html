@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Balance robot</title>
+    <!-- trunk builds this crate to wasm and inserts the script tags that load it. -->
+    
+<script type="module">
+import init, * as bindings from '/BalanceRobot/pr-preview/pr-80/balance-web-fdddae364cefd7ef.js';
+
+const wasm = await init({ module_or_path: '/BalanceRobot/pr-preview/pr-80/balance-web-85433c183e77dcb_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; background: #fff; color: #111; }
+      @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
+      main { padding: 16px; font-size: 2rem; }
+    </style>
+  <link rel="modulepreload" href="/BalanceRobot/pr-preview/pr-80/balance-web-fdddae364cefd7ef.js" crossorigin="anonymous" integrity="sha384-+NquZ1jbFUdpIfASsWezKoBRxtRS1D8D5ZeBs9Bn4mA+hfqFdRf28SHcsy8j/0Vv"><link rel="preload" href="/BalanceRobot/pr-preview/pr-80/balance-web-85433c183e77dcb_bg.wasm" crossorigin="anonymous" integrity="sha384-J0y+0EbweS6MDmpYXTwya2TfJ827kw62QNwT+CMiNervU/Fw9IMMh5wLhIa3T/zy" as="fetch" type="application/wasm"></head>
+  <body>
+    <!-- Replaced by the Rust code once the .wasm has loaded; if it still says "loading",
+         the wasm did not run (see the browser console). -->
+    <main id="app">loading…</main>
+  </body>
+</html>
