@@ -17,7 +17,6 @@
 //!   writes. The remote writes each packet into one characteristic.
 
 use balance_core::link::{self, PACKET_UUID, Packet, SERVICE_UUID, Watchdog};
-use bt_hci::controller::ExternalController;
 use core::fmt::Write as _;
 use embassy_executor::Spawner;
 use embassy_futures::{

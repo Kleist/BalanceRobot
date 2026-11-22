@@ -36,10 +36,9 @@ esp-alloc = "0.11"
 # BLE host stack (GAP, later GATT) on top of any HCI controller. Only the peripheral role:
 # the robot advertises and gets connected to, it never scans.
 trouble-host = { version = "0.8", default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool"] }
-# HCI types and `ExternalController`, which drives a controller over an HCI transport.
-# 0.10 is what trouble-host 0.8 uses; its `Transport` trait (from `bt-hci-transport` 0.1) is
-# the one esp-radio's `BleConnector` implements.
-bt-hci = "0.10"
+# No direct `bt-hci` dependency: `ExternalController` comes from trouble-host's re-export, so
+# its bt-hci version always matches the one trouble-host was built against. A direct dep let
+# Dependabot bump bt-hci alone (PR #78), which pulled in a second, incompatible bt-hci.
 # `join`: runs the BLE host's runner and the advertising code side by side in one task.
 embassy-futures = "0.1"
 # Async task executor: we only use its `#[task]` macro and `Spawner`; esp-rtos supplies the executor

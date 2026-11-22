@@ -44,7 +44,6 @@ name = "balance-robot"
 version = "0.1.0"
 dependencies = [
  "balance-core",
- "bt-hci 0.10.1",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",
