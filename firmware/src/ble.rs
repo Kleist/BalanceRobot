@@ -1,8 +1,10 @@
 //! BLE on the robot: the link to the micro:bit remote. The robot advertises as
 //! `BalanceRobot` with its GATT service, accepts one connection at a time, and logs every
-//! packet written to the service's packet characteristic as `# remote: ...`, decoded with
-//! `balance_core::link`. A `Watchdog` notices when packets stop. Nothing is applied to the
-//! motors yet.
+//! valid packet written to the service's packet characteristic (decoded with
+//! `balance_core::link`). The log gets one `# remote: ... packets/s ...` line a second
+//! (count, lost, longest gap, the latest command), a line whenever `active` changes, and
+//! every rejected write. A `Watchdog` notices when packets stop. Nothing is applied to
+//! the motors yet.
 //!
 //! Three layers, bottom up:
 //! - **Controller**: Espressif's BLE controller, a closed-source blob in the radio
@@ -16,7 +18,7 @@
 //!   each a small value with a UUID and a handle) that the connected device reads and
 //!   writes. The remote writes each packet into one characteristic.
 
-use balance_core::link::{self, PACKET_UUID, Packet, SERVICE_UUID, Watchdog};
+use balance_core::link::{self, LinkStats, PACKET_UUID, Packet, SERVICE_UUID, Watchdog};
 use core::fmt::Write as _;
 use embassy_executor::Spawner;
 use embassy_futures::{
@@ -46,8 +48,10 @@ const CONNECTIONS: usize = 1;
 /// L2CAP channels: the ones a connection always has (ATT for GATT, the signalling one).
 const L2CAP_CHANNELS: usize = 2;
 
-/// How often the watchdog is checked while connected.
+/// How often the watchdog is checked while connected and no packets arrive.
 const WATCHDOG_PERIOD: Duration = Duration::from_millis(50);
+/// How often the packet statistics are logged while connected.
+const STATS_PERIOD: Duration = Duration::from_secs(1);
 
 /// The remote's service: one characteristic it writes packets into. Writable with and
 /// without response: "without" (a BLE *command*) is what the remote will use, since it
@@ -201,14 +205,27 @@ async fn serve<C: Controller>(
     }
 }
 
-/// Handles one connection's events until it disconnects: logs every packet write and
-/// checks the watchdog every `WATCHDOG_PERIOD`.
+/// Handles one connection's events until it disconnects: counts the packets, logs the
+/// statistics every `STATS_PERIOD` and every change of `active`, and checks the watchdog
+/// (at the latest every `WATCHDOG_PERIOD`).
 async fn handle_connection(gatt: &GattConnection<'_, '_, DefaultPacketPool>, server: &Server<'_>) {
     let mut watchdog = Watchdog::new(link::TIMEOUT_US);
+    let mut stats = LinkStats::new();
+    // The latest valid packet, for the `active` changes and the statistics line.
+    let mut latest: Option<Packet> = None;
+    let mut next_stats = Instant::now() + STATS_PERIOD;
     loop {
-        match select(gatt.next(), Timer::after(WATCHDOG_PERIOD)).await {
+        // While packets arrive, `gatt.next()` wins every time and the timer restarts
+        // each round; it only fires when they stop.
+        let event = select(gatt.next(), Timer::after(WATCHDOG_PERIOD)).await;
+        if Instant::now() >= next_stats {
+            next_stats += STATS_PERIOD;
+            log_stats(&mut stats, latest).await;
+        }
+        match event {
             Either::First(GattConnectionEvent::Disconnected { reason }) => {
                 watchdog.on_disconnect();
+                stats.on_disconnect();
                 log(format_args!(
                     "ble: disconnected ({reason:?}); remote: targets 0"
                 ))
@@ -226,16 +243,23 @@ async fn handle_connection(gatt: &GattConnection<'_, '_, DefaultPacketPool>, ser
                     });
                     match decoded {
                         Ok(packet) => {
-                            watchdog.on_packet(now_us(), packet);
-                            let command = packet.command();
-                            log(format_args!(
-                                "remote: seq {} active {} speed {:.2} turn {:.2}",
-                                packet.seq,
-                                u8::from(packet.active),
-                                command.speed,
-                                command.turn
-                            ))
-                            .await;
+                            let now = now_us();
+                            watchdog.on_packet(now, packet);
+                            stats.on_packet(now, packet.seq);
+                            let was_active = latest.is_some_and(|p| p.active);
+                            if packet.active != was_active {
+                                // The first command of a grip shows whether it starts at 0.
+                                let command = packet.command();
+                                log(format_args!(
+                                    "remote: active {} (seq {}) speed {:.2} turn {:.2}",
+                                    u8::from(packet.active),
+                                    packet.seq,
+                                    command.speed,
+                                    command.turn
+                                ))
+                                .await;
+                            }
+                            latest = Some(packet);
                         }
                         Err(e) => {
                             let shown = &raw[..raw_len.min(raw.len())];
@@ -258,10 +282,30 @@ async fn handle_connection(gatt: &GattConnection<'_, '_, DefaultPacketPool>, ser
             Either::Second(()) => {
                 if watchdog.poll(now_us()) {
                     log(format_args!("remote: link timeout, targets 0")).await;
+                    // After the timeout a new packet counts as a change again.
+                    latest = None;
                 }
             }
         }
     }
+}
+
+/// Logs the packets since the last call (`stats`) and the latest command, e.g.
+/// `remote: 50 packets/s, lost 0, longest gap 21 ms; active 1 speed 0.42 turn -0.10`.
+async fn log_stats(stats: &mut LinkStats, latest: Option<Packet>) {
+    let summary = stats.take();
+    let packet = latest.unwrap_or_default();
+    let command = packet.command();
+    log(format_args!(
+        "remote: {} packets/s, lost {}, longest gap {} ms; active {} speed {:.2} turn {:.2}",
+        summary.received,
+        summary.lost,
+        summary.longest_gap_us / 1000,
+        u8::from(packet.active),
+        command.speed,
+        command.turn
+    ))
+    .await;
 }
 
 /// The first 8 bytes of a write (fewer if it is shorter; the rest stays 0), for the log.

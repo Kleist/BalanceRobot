@@ -1,10 +1,9 @@
 //! BLE on the micro:bit: the remote's side of the link to the robot. The remote is the
 //! *central*: it scans for an advertisement that lists the robot's service UUID
 //! (`balance_core::link::SERVICE_UUID`), connects to whoever sent it, finds the packet
-//! characteristic and writes a packet into it. For now that is a fixed one (inactive,
-//! speed and turn 0, `seq` counting up) once a second; live tilt commands come next. When
-//! the connection drops it starts scanning again. [`connected`] tells the display task
-//! whether it is connected.
+//! characteristic and writes every packet the tilt task hands over with [`send`] (one
+//! per accelerometer sample, 50 per second). When the connection drops it starts
+//! scanning again. [`connected`] tells the display task whether it is connected.
 //!
 //! Three layers, bottom up, as on the robot:
 //! - **Controller**: Nordic's `SoftDevice` Controller (SDC), a closed-source link layer
@@ -24,10 +23,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use balance_core::{
-    link::{self, PACKET_UUID, Packet, SERVICE_UUID},
-    remote::Command,
-};
+use balance_core::link::{self, PACKET_UUID, Packet, SERVICE_UUID};
 use embassy_executor::Spawner;
 use embassy_futures::{
     join::join,
@@ -35,7 +31,7 @@ use embassy_futures::{
 };
 use embassy_nrf::{Peri, peripherals, rng};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use nrf_mpsl::{MultiprotocolServiceLayer, raw as mpsl_raw};
 use nrf_sdc::{self as sdc, SoftdeviceController};
 use static_cell::StaticCell;
@@ -54,8 +50,8 @@ const L2CAP_CHANNELS: usize = 2;
 /// Services the GATT client remembers: only ours.
 const MAX_SERVICES: usize = 1;
 
-/// How often the fixed packet is written.
-const PACKET_PERIOD: Duration = Duration::from_secs(1);
+/// How often the number of packets sent is logged.
+const STATS_PERIOD: Duration = Duration::from_secs(1);
 /// Wait before scanning again after something failed.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -63,6 +59,12 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// (both sides then give up on it). The default is 8 s, which would make the remote
 /// notice a robot reset only after 8 s; 2 s still rides out a short radio dropout.
 const SUPERVISION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Time between two connection events, the moments the two radios meet; a packet waits
+/// for the next one. `trouble-host`'s default is 80 ms, which would deliver four samples
+/// at a time, up to 80 ms late. 20 ms matches the 50 Hz samples: about one per event.
+/// The central sets the interval (the peripheral can only ask for another one).
+const CONNECTION_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Memory for the `SoftDevice` Controller (connection and buffer state), in bytes.
 /// `build` checks it and logs the size it needs ("Memory buffer too big/small") if this
@@ -81,9 +83,20 @@ static CONNECTED: AtomicBool = AtomicBool::new(false);
 /// task that connects. A `Signal` keeps only the latest value.
 static FOUND: Signal<CriticalSectionRawMutex, Address> = Signal::new();
 
+/// The newest packet from the tilt task. A `Signal` holds only the latest value, so if
+/// the radio falls behind, old samples are skipped (the robot sees a gap in `seq`)
+/// instead of piling up and arriving late.
+static PACKET: Signal<CriticalSectionRawMutex, Packet> = Signal::new();
+
 static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 static RNG: StaticCell<rng::Rng<'static, embassy_nrf::mode::Async>> = StaticCell::new();
 static SDC_MEM: StaticCell<sdc::Mem<SDC_MEM_SIZE>> = StaticCell::new();
+
+/// Hands a packet to the link, which sends it as soon as it can (or drops it when not
+/// connected, or when a newer one comes first).
+pub fn send(packet: Packet) {
+    PACKET.signal(packet);
+}
 
 /// Whether the remote is connected to a robot.
 pub fn connected() -> bool {
@@ -216,6 +229,8 @@ async fn link_loop(
                 ..ScanConfig::default()
             },
             connect_params: RequestedConnParams {
+                min_connection_interval: CONNECTION_INTERVAL,
+                max_connection_interval: CONNECTION_INTERVAL,
                 supervision_timeout: SUPERVISION_TIMEOUT,
                 ..RequestedConnParams::default()
             },
@@ -261,8 +276,8 @@ async fn find_robot(
     Ok(robot)
 }
 
-/// Finds the packet characteristic and writes the fixed packet every `PACKET_PERIOD`
-/// until the connection drops. The GATT client's `task` receives the robot's replies
+/// Finds the packet characteristic and writes every packet from [`send`] until the
+/// connection drops; logs how many went out every `STATS_PERIOD`. The GATT client's `task` receives the robot's replies
 /// (to the discovery requests) and must run next to the requests.
 async fn send_packets(
     stack: &Stack<'_, Sdc, DefaultPacketPool>,
@@ -277,20 +292,25 @@ async fn send_packets(
         let packet: Characteristic<[u8; link::LEN]> = client
             .characteristic_by_uuid(service, &Uuid::new_long(link::uuid_bytes(PACKET_UUID)))
             .await?;
-        defmt::info!("ble: found the packet characteristic, writing once a second");
+        defmt::info!("ble: found the packet characteristic, sending");
 
-        let mut seq: u8 = 0;
-        let mut ticker = Ticker::every(PACKET_PERIOD);
+        // Forget a packet from before the connection: it may be seconds old.
+        PACKET.reset();
+        let mut sent: u32 = 0;
+        let mut next_stats = Instant::now() + STATS_PERIOD;
         loop {
-            let bytes = Packet::new(seq, Command::default(), false).encode();
+            let bytes = PACKET.wait().await.encode();
             // Without response: a BLE *command*, no acknowledgement per packet, so the
-            // next one never waits for a round trip (what 50 packets/s will need).
+            // next one never waits for a round trip. It waits only for a free buffer.
             client
                 .write_characteristic_without_response(&packet, &bytes)
                 .await?;
-            defmt::info!("ble: sent {=[u8]:02x}", bytes);
-            seq = seq.wrapping_add(1);
-            ticker.next().await;
+            sent += 1;
+            if Instant::now() >= next_stats {
+                next_stats += STATS_PERIOD;
+                defmt::info!("ble: {=u32} packets/s sent", sent);
+                sent = 0;
+            }
         }
     };
     match select(client.task(), writes).await {
