@@ -78,7 +78,11 @@ jobs:
 
   remote:
     name: Remote (micro:bit v2)
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest (26.04): nrf-sdc-sys / nrf-mpsl-sys run bindgen on Nordic's C
+    # headers, and with 26.04's libclang `stdint.h` defines no `uint32_t` for the
+    # thumbv7em target ("unknown type name 'uint32_t'"). 24.04 (libclang 17/18) works,
+    # as on the development machine.
+    runs-on: ubuntu-24.04
     # remote/ is its own cargo workspace; its .cargo/config.toml sets the target and linker scripts.
     defaults:
       run:
