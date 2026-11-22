@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Balance robot</title>
+    <!-- trunk builds this crate to wasm and inserts the script tags that load it. -->
+    
+<script type="module">
+import init, * as bindings from '/BalanceRobot/pr-preview/pr-81/balance-web-c1006621abbd3130.js';
+
+const wasm = await init({ module_or_path: '/BalanceRobot/pr-preview/pr-81/balance-web-76ec32275deca29e_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font-family: system-ui, sans-serif; background: #fff; color: #111; }
+      @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
+      h1 { font-size: 1.2rem; margin: 16px; }
+      /* The Rust code sizes the canvas's pixel buffer to this on-screen size. */
+      canvas { display: block; width: 100%; height: 70vh; }
+    </style>
+  <link rel="modulepreload" href="/BalanceRobot/pr-preview/pr-81/balance-web-c1006621abbd3130.js" crossorigin="anonymous" integrity="sha384-4GaUjmxUSj6ENYyvdullz7mXOZA4YFfYUldtWVAud0UC4UVjzRz91QeeKaK3SGcE"><link rel="preload" href="/BalanceRobot/pr-preview/pr-81/balance-web-76ec32275deca29e_bg.wasm" crossorigin="anonymous" integrity="sha384-0xDKkK2CW0mgcethNYMjzItxmzBrddIVPJYHcN6eL0ikWSeA79v8bKjPCg0SoHDP" as="fetch" type="application/wasm"></head>
+  <body>
+    <h1>Balance robot simulator</h1>
+    <canvas id="robot"></canvas>
+    <script type="module">
+      // trunk loads the wasm, then fires this event and puts the Rust exports on
+      // window.wasmBindings. The browser calls `loop` once per screen refresh; the
+      // simulation itself (and the drawing) is all Rust, in App.frame.
+      addEventListener("TrunkApplicationStarted", () => {
+        const app = new window.wasmBindings.App("robot");
+        const loop = (now) => {
+          app.frame(now);
+          requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+      });
+    </script>
+  </body>
+</html>
