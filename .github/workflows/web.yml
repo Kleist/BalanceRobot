@@ -1,13 +1,20 @@
 name: Web app
 
-# Builds the phone remote / browser simulator (web/) on every PR and push, and publishes it
-# to GitHub Pages from main. Separate from ci.yml because deploying needs extra permissions
-# and must not be cancelled half-way like a superseded CI run.
+# Builds the phone remote / browser simulator (web/) and publishes it to GitHub Pages:
+# main at https://kleist.github.io/BalanceRobot/, and every PR as a preview at
+# .../BalanceRobot/pr-preview/pr-<number>/ (a bot comment on the PR links it; the preview
+# is deleted when the PR is closed).
+#
+# Pages serves one site per repo, from the gh-pages branch (repo Settings → Pages → Deploy
+# from a branch → gh-pages, / (root)). main's build goes to the branch root, each PR's into
+# its own folder under pr-preview/, so previews never replace the live site.
 
 on:
   push:
     branches: [main]
   pull_request:
+    # `closed` too, so the preview is removed when the PR is merged or closed.
+    types: [opened, reopened, synchronize, closed]
   workflow_dispatch:
 
 permissions:
@@ -18,44 +25,53 @@ env:
 
 jobs:
   build:
-    name: Build (wasm)
+    name: Build and publish
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
+    permissions:
+      contents: write # push the built site to the gh-pages branch
+      pull-requests: write # the preview link comment
+    # Every run pushes to gh-pages: one at a time, and never cancel one half-way.
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
+    env:
+      # Pages serves the site under /<repo name>/ (and a PR preview in its own folder below
+      # it), so every asset path in the built page must start with that.
+      PUBLIC_URL: ${{ github.event_name == 'pull_request' && format('/{0}/pr-preview/pr-{1}/', github.event.repository.name, github.event.number) || format('/{0}/', github.event.repository.name) }}
+      BUILD: ${{ github.event.action != 'closed' }}
+      # PRs from forks get a read-only token and can't push a preview; they are only built.
+      PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@v7
       # rustup installs the version, components and targets (incl. wasm32) from rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - if: env.BUILD == 'true'
+        run: rustup toolchain install
+      - if: env.BUILD == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: web
-      - uses: taiki-e/install-action@v2
+      - if: env.BUILD == 'true'
+        uses: taiki-e/install-action@v2
         with:
           tool: trunk
-      - run: cargo fmt --check
-      - run: cargo clippy --target wasm32-unknown-unknown --release -- -D warnings
-      # Pages serves the site under /<repo name>/, so every asset path must start with it.
-      - run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
-      - uses: actions/upload-pages-artifact@v4
-        with:
-          path: web/dist
+      - if: env.BUILD == 'true'
+        working-directory: web
+        run: |
+          cargo fmt --check
+          cargo clippy --target wasm32-unknown-unknown --release -- -D warnings
+          trunk build --release --public-url "$PUBLIC_URL"
 
-  deploy:
-    name: Deploy to GitHub Pages
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write # publish the site
-      id-token: write # proves to Pages that this run is the one allowed to deploy
-    # One deploy at a time; a newer push waits instead of cancelling a deploy in progress.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish main to the site root
+        if: github.event_name != 'pull_request'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: web/dist
+          branch: gh-pages
+          # Leave the PR previews alone when replacing the root.
+          clean-exclude: pr-preview/
+
+      - name: Publish (or remove) the PR preview
+        if: github.event_name == 'pull_request' && env.PUBLISH == 'true'
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: web/dist

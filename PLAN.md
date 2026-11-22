@@ -146,7 +146,7 @@ A static web app on **GitHub Pages** turns any phone into a tilt remote, and its
 - One Rust crate, `web/`, built with `wasm-bindgen` (via `trunk` or `wasm-pack`) into a static page. Rust does the work: `sim` for Simulator mode, `balance_core::remote` for tilt → command, `balance_core::link` for the packet. JavaScript only connects the browser APIs.
 - Same remote logic as the micro:bit: a big on-screen button replaces A+B (hold to drive; the phone's attitude at that moment is the zero point). Tilt from the DeviceOrientation API.
 - Two modes, same controls: Simulator mode drives the simulated robot, drawn from the side on a canvas with pitch, speed and battery. Robot mode sends the same `link` packet over Web Bluetooth at 20-50 Hz to the robot's GATT characteristic.
-- Deploy: a GitHub Actions job builds the page on every push to main and publishes it with `actions/deploy-pages`; PRs build it in CI.
+- Deploy: a GitHub Actions job builds the page and pushes it to the `gh-pages` branch that Pages serves: `main` at the site root, each PR as a preview in `pr-preview/pr-<number>/`, so changes can be tried on a phone before merging.
 - Browser support: the simulator runs everywhere. Web Bluetooth works in Chrome on Android, Windows, macOS and ChromeOS, not in Safari or Firefox; on iPhone use the Bluefy browser. DeviceOrientation on iPhone needs a tap to grant permission; both APIs need HTTPS, which Pages provides.
 
 Steps I2-I4 need no hardware and can start right away (I1 is done, see `HISTORY.md`).
