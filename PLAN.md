@@ -105,7 +105,8 @@ One print a week, so every print must answer as many questions as possible: the 
 - 4 walls, 30-40 % infill, oriented so crash loads run along the layers. PETG on the MK3: stock PrusaSlicer profile, glue stick or the textured sheet (PETG can stick too hard to smooth PEI).
 - For the giveaway robots, consider ordering the final body from JLC3DP (MJF nylon PA12) together with a board order.
 
-- [ ] G1. Fit-test plate (PLA): TT motor cradle, wheel hub on a motor shaft, heat-set insert holes in three sizes, the board hole pattern, USB-C and switch cut-outs, a battery holder seat, a tolerance comb (0.1-0.5 mm clearances)
+- [x] G1a. Fit-test plate design (PLA) in `chassis/fit_test.scad`: TT motor cradle, wheel hubs on the motor shaft, heat-set insert holes in three sizes, the board hole pattern, USB-C and switch cut-outs, a cell seat, a tolerance comb (0.1-0.5 mm clearances). Check: renders to clean solids in CI, slices for the MK3 without supports
+- [ ] G1b. Measure a TT motor and the cells (the `MEASURE` values in `chassis/params.scad`), correct them, then print the plate and test each piece as in `chassis/README.md`. Check: the numbers are written down and copied into `params.scad` (insert hole, hub clearance, `fit_slide`, USB-C opening)
 - [ ] G2. Body v1 (PLA), with the real motors and the real or a dummy board. Check: goes together without force, cells can be swapped, the USB-C plug reaches
 - [ ] G3. Body v2 (PETG) + bumpers and tires (TPU). Check: drop it from upright onto a hard floor 20 times; note what breaks first
 - [ ] G4. Body v3 with the drop-test fixes; the Rev A board goes in. Check: it balances in the new body

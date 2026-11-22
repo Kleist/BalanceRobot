@@ -158,3 +158,19 @@ jobs:
         with:
           header: coverage
           path: ${{ runner.temp }}/coverage.md
+
+  chassis:
+    name: Chassis (OpenSCAD render)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y openscad fonts-dejavu-core
+      # Fails on a syntax error; prints a warning if a part isn't a clean solid.
+      - run: |
+          chassis/render.sh out 2>&1 | tee render.log
+          ! grep -E "ERROR|may not be a valid 2-manifold" render.log
+        shell: bash
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chassis-stl
+          path: chassis/out/*.stl
