@@ -1,13 +1,13 @@
 //! BBC micro:bit v2 tilt remote for the balance robot. So far: the accelerometer is read
 //! at 50 Hz and turned into a speed / turn command (`balance_core::remote`), which the
-//! 5x5 LED matrix shows as one dot; presses of buttons A and B are logged. Nothing is
-//! sent to the robot yet.
+//! 5x5 LED matrix shows as one dot. Nothing is sent to the robot yet.
 //!
 //! Hold it upright in front of you, LEDs facing you, USB edge up, at whatever tilt you
-//! like to start from. About half a second after reset, that attitude becomes the zero
-//! point (later: the moment A+B are pressed). Tip the top edge further away for forward
-//! (the dot moves up), towards you for backward, lower the right side to turn right (the
-//! dot moves right). Within ±5° of the zero the dot stays in the centre.
+//! like, and press and hold **both** buttons (the grip): that attitude becomes the
+//! reference. Tip the top edge further away for forward (the dot moves up), towards you
+//! for backward, lower the right side to turn right (the dot moves right). Within ±5° of
+//! the reference the dot stays in the centre. Let go of either button and the command
+//! is 0 (dot in the centre) whatever the tilt.
 //!
 //! The LED matrix is wired as 5 row and 5 column lines (micro:bit v2 schematic): an LED
 //! lights when its row is driven high and its column low. A pattern needs the rows
@@ -15,17 +15,23 @@
 //!
 //! Buttons A (P0.14) and B (P0.23) have pull-up resistors on the board and pull the pin
 //! low while pressed. `wait_for_low` is async: the GPIOTE peripheral raises an interrupt
-//! on the edge, so the task sleeps until then instead of polling.
+//! on the edge, so the task sleeps until then instead of polling. Each button task
+//! publishes its debounced state in an `AtomicBool` (`A_HELD`, `B_HELD`), which the tilt
+//! task reads every sample.
 //!
 //! The LSM303AGR (accelerometer + magnetometer) sits on the micro:bit's internal I2C bus
 //! (SCL P0.08, SDA P0.16, pull-ups on the board), separate from the edge connector's.
-//! The accelerometer answers at address 0x19. Five times a second the log shows
-//! `tilt: pitch .. roll .. -> speed .. turn ..`.
+//! The accelerometer answers at address 0x19. The log shows `grip on` (with the
+//! reference) and `grip off`, and five times a second
+//! `tilt: pitch .. roll .. rel .. .. -> speed .. turn ..` (attitude, relative tilt,
+//! command).
 
 #![no_std]
 #![no_main]
 
-use balance_core::remote::{self, Config, TiltRemote};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use balance_core::remote::{self, Config, GripChange, TiltRemote};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_nrf::{
@@ -45,9 +51,6 @@ const DEBOUNCE: Duration = Duration::from_millis(20);
 const ACCEL_PERIOD: Duration = Duration::from_millis(20);
 /// `ACCEL_PERIOD` in seconds, for the filter.
 const ACCEL_PERIOD_S: f32 = 0.02;
-/// Samples before the zero is captured: 0.5 s, 5 filter time constants, so the filter
-/// has settled from its first reading.
-const ZERO_AFTER_SAMPLES: u32 = 25;
 /// Log one line every this many samples (5 per second).
 const LOG_EVERY_N_SAMPLES: u32 = 10;
 
@@ -56,6 +59,13 @@ const LOG_EVERY_N_SAMPLES: u32 = 10;
 bind_interrupts!(struct Irqs {
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
 });
+
+/// Debounced state of button A / B, written by its `button` task. An atomic, so two
+/// tasks can share it without a lock: the Cortex-M4 loads and stores a byte in one
+/// instruction, and `Relaxed` is enough because nothing else is ordered by it.
+static A_HELD: AtomicBool = AtomicBool::new(false);
+/// See [`A_HELD`].
+static B_HELD: AtomicBool = AtomicBool::new(false);
 
 /// RAM copy buffer for I2C writes from flash, see `main`.
 static I2C_TX_BUFFER: StaticCell<[u8; 8]> = StaticCell::new();
@@ -118,13 +128,13 @@ async fn main(spawner: Spawner) {
 
     // The board has external pull-ups; the internal one too does no harm.
     let buttons = [
-        ("A", Input::new(p.P0_14, Pull::Up)),
-        ("B", Input::new(p.P0_23, Pull::Up)),
+        ("A", Input::new(p.P0_14, Pull::Up), &A_HELD),
+        ("B", Input::new(p.P0_23, Pull::Up), &B_HELD),
     ];
     // Calling a task function only builds it; that fails if all its slots are in use.
     // `spawn` then hands it to the executor.
-    for (name, pin) in buttons {
-        match button(name, pin) {
+    for (name, pin, held) in buttons {
+        match button(pin, held) {
             Ok(task) => spawner.spawn(task),
             Err(e) => defmt::error!("button {} task not started: {}", name, e),
         }
@@ -145,22 +155,26 @@ async fn main(spawner: Spawner) {
     }
 }
 
-/// Logs each press and release of one button. Two instances run, one per button
-/// (`pool_size = 2`: the executor reserves memory for two copies of this task).
+/// Keeps `held` equal to the debounced state of one button. Two instances run, one per
+/// button (`pool_size = 2`: the executor reserves memory for two copies of this task).
+/// A change only counts once the pin has stayed at its new level for `DEBOUNCE`.
 #[embassy_executor::task(pool_size = 2)]
-async fn button(name: &'static str, mut pin: Input<'static>) {
-    let mut presses: u32 = 0;
+async fn button(mut pin: Input<'static>, held: &'static AtomicBool) {
     loop {
         pin.wait_for_low().await;
         Timer::after(DEBOUNCE).await;
         if pin.is_high() {
             continue; // a bounce or a glitch, not a press
         }
-        presses += 1;
-        defmt::info!("button {} pressed ({} so far)", name, presses);
-        pin.wait_for_high().await;
-        Timer::after(DEBOUNCE).await;
-        defmt::info!("button {} released", name);
+        held.store(true, Ordering::Relaxed);
+        loop {
+            pin.wait_for_high().await;
+            Timer::after(DEBOUNCE).await;
+            if pin.is_high() {
+                break;
+            }
+        }
+        held.store(false, Ordering::Relaxed);
     }
 }
 
@@ -198,6 +212,7 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
 
     let mut remote = TiltRemote::new(Config::MICROBIT);
     let mut samples: u32 = 0;
+    defmt::info!("hold A+B to drive");
     // A `Ticker` fires at fixed times (every 20 ms after the start), unlike
     // `Timer::after`, which would add the time spent reading to each period.
     let mut ticker = Ticker::every(ACCEL_PERIOD);
@@ -210,38 +225,36 @@ async fn tilt(mut sensor: Accel, mut display: Display) {
                 continue;
             }
         };
+        let both_held = A_HELD.load(Ordering::Relaxed) && B_HELD.load(Ordering::Relaxed);
         #[allow(
             clippy::cast_precision_loss,
             reason = "readings are within ±2000 mg, exact in f32"
         )]
-        let command = remote.step([x as f32, y as f32, z as f32], ACCEL_PERIOD_S);
+        let update = remote.step([x as f32, y as f32, z as f32], ACCEL_PERIOD_S, both_held);
         samples += 1;
 
-        if samples == ZERO_AFTER_SAMPLES {
-            remote.capture_zero();
-            let zero = remote.zero();
-            defmt::info!(
-                "zero: pitch {=f32} roll {=f32} deg",
-                zero.pitch_deg,
-                zero.roll_deg
-            );
-        }
-        if samples < ZERO_AFTER_SAMPLES {
-            continue; // no zero yet: the command would be relative to upright
+        match update.grip {
+            GripChange::On { reference } => defmt::info!(
+                "grip on: reference pitch {=f32} roll {=f32} deg",
+                reference.pitch_deg,
+                reference.roll_deg
+            ),
+            GripChange::Off => defmt::info!("grip off"),
+            GripChange::None => {}
         }
 
-        let (row, col) = remote::dot(command);
+        let (row, col) = remote::dot(update.command);
         display.show_dot(row, col);
 
-        if samples.is_multiple_of(LOG_EVERY_N_SAMPLES)
-            && let Some(attitude) = remote.attitude()
-        {
+        if samples.is_multiple_of(LOG_EVERY_N_SAMPLES) {
             defmt::info!(
-                "tilt: pitch {=f32} roll {=f32} deg -> speed {=f32} turn {=f32}",
-                attitude.pitch_deg,
-                attitude.roll_deg,
-                command.speed,
-                command.turn
+                "tilt: pitch {=f32} roll {=f32} rel {=f32} {=f32} deg -> speed {=f32} turn {=f32}",
+                update.attitude.pitch_deg,
+                update.attitude.roll_deg,
+                update.relative.pitch_deg,
+                update.relative.roll_deg,
+                update.command.speed,
+                update.command.turn
             );
         }
     }
