@@ -1,0 +1,38 @@
+[package]
+name = "balance-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Phone remote and browser simulator for the balance robot (WebAssembly)"
+publish = false
+
+# Own workspace: this crate is built for wasm32-unknown-unknown by trunk, so it stays out of
+# the host workspace in the repo root, like firmware/ and remote/. That also keeps
+# wasm-bindgen and web-sys out of the host builds, tests and coverage.
+[workspace]
+
+[dependencies]
+# The bridge between Rust and JavaScript: generates the JS glue that loads the .wasm file
+# and lets Rust call browser functions (and JS call Rust). trunk runs the matching
+# `wasm-bindgen` command-line tool after `cargo build`.
+wasm-bindgen = "0.2"
+# Typed Rust bindings for the browser APIs (DOM, canvas, Web Bluetooth, ...). Every API is
+# behind its own feature, so only the ones listed here are compiled.
+web-sys = { version = "0.3", features = ["Document", "Element", "Window"] }
+
+# Same policy as [workspace.lints] in the root Cargo.toml; keep the four in sync.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[profile.release]
+# Smaller .wasm = faster first load on a phone.
+opt-level = "s"
+lto = true
+codegen-units = 1

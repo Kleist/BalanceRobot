@@ -1,0 +1,61 @@
+name: Web app
+
+# Builds the phone remote / browser simulator (web/) on every PR and push, and publishes it
+# to GitHub Pages from main. Separate from ci.yml because deploying needs extra permissions
+# and must not be cancelled half-way like a superseded CI run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (wasm)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      # rustup installs the version, components and targets (incl. wasm32) from rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+      - run: cargo fmt --check
+      - run: cargo clippy --target wasm32-unknown-unknown --release -- -D warnings
+      # Pages serves the site under /<repo name>/, so every asset path must start with it.
+      - run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: web/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # publish the site
+      id-token: write # proves to Pages that this run is the one allowed to deploy
+    # One deploy at a time; a newer push waits instead of cancelling a deploy in progress.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

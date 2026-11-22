@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Balance robot</title>
+    <!-- trunk builds this crate to wasm and inserts the script tags that load it. -->
+    <link data-trunk rel="rust" data-wasm-opt="s">
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; background: #fff; color: #111; }
+      @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
+      main { padding: 16px; font-size: 2rem; }
+    </style>
+  </head>
+  <body>
+    <!-- Replaced by the Rust code once the .wasm has loaded; if it still says "loading",
+         the wasm did not run (see the browser console). -->
+    <main id="app">loading…</main>
+  </body>
+</html>

@@ -149,9 +149,8 @@ A static web app on **GitHub Pages** turns any phone into a tilt remote, and its
 - Deploy: a GitHub Actions job builds the page on every push to main and publishes it with `actions/deploy-pages`; PRs build it in CI.
 - Browser support: the simulator runs everywhere. Web Bluetooth works in Chrome on Android, Windows, macOS and ChromeOS, not in Safari or Firefox; on iPhone use the Bluefy browser. DeviceOrientation on iPhone needs a tap to grant permission; both APIs need HTTPS, which Pages provides.
 
-Steps I1-I4 need no hardware and can start right away.
+Steps I2-I4 need no hardware and can start right away (I1 is done, see `HISTORY.md`).
 
-- [ ] I1. `web/` crate skeleton and the Pages deploy job. Check: the page shows "hello" at the Pages URL
 - [ ] I2. Simulator in the browser: run `sim::closed_loop` at real time in wasm and draw the robot. Check: it stands up from a 5° start, as in `cargo run -p sim --example balance`
 - [ ] I3. Push the robot: a tap or drag on the canvas gives it a shove; a reset button stands it up. Check: it catches small pushes and falls on big ones
 - [ ] I4. Phone tilt into the simulator, with the grip and tilt math from group E. Check: hold the button and tilt, the simulated robot drives; let go and it stops
