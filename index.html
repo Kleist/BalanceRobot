@@ -7,9 +7,9 @@
     <!-- trunk builds this crate to wasm and inserts the script tags that load it. -->
     
 <script type="module">
-import init, * as bindings from '/BalanceRobot/balance-web-fdddae364cefd7ef.js';
+import init, * as bindings from '/BalanceRobot/balance-web-c1006621abbd3130.js';
 
-const wasm = await init({ module_or_path: '/BalanceRobot/balance-web-85433c183e77dcb_bg.wasm' });
+const wasm = await init({ module_or_path: '/BalanceRobot/balance-web-76ec32275deca29e_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -19,14 +19,29 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
     <style>
+      :root { color-scheme: light dark; }
       body { margin: 0; font-family: system-ui, sans-serif; background: #fff; color: #111; }
       @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
-      main { padding: 16px; font-size: 2rem; }
+      h1 { font-size: 1.2rem; margin: 16px; }
+      /* The Rust code sizes the canvas's pixel buffer to this on-screen size. */
+      canvas { display: block; width: 100%; height: 70vh; }
     </style>
-  <link rel="modulepreload" href="/BalanceRobot/balance-web-fdddae364cefd7ef.js" crossorigin="anonymous" integrity="sha384-+NquZ1jbFUdpIfASsWezKoBRxtRS1D8D5ZeBs9Bn4mA+hfqFdRf28SHcsy8j/0Vv"><link rel="preload" href="/BalanceRobot/balance-web-85433c183e77dcb_bg.wasm" crossorigin="anonymous" integrity="sha384-J0y+0EbweS6MDmpYXTwya2TfJ827kw62QNwT+CMiNervU/Fw9IMMh5wLhIa3T/zy" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/BalanceRobot/balance-web-c1006621abbd3130.js" crossorigin="anonymous" integrity="sha384-4GaUjmxUSj6ENYyvdullz7mXOZA4YFfYUldtWVAud0UC4UVjzRz91QeeKaK3SGcE"><link rel="preload" href="/BalanceRobot/balance-web-76ec32275deca29e_bg.wasm" crossorigin="anonymous" integrity="sha384-0xDKkK2CW0mgcethNYMjzItxmzBrddIVPJYHcN6eL0ikWSeA79v8bKjPCg0SoHDP" as="fetch" type="application/wasm"></head>
   <body>
-    <!-- Replaced by the Rust code once the .wasm has loaded; if it still says "loading",
-         the wasm did not run (see the browser console). -->
-    <main id="app">loading…</main>
+    <h1>Balance robot simulator</h1>
+    <canvas id="robot"></canvas>
+    <script type="module">
+      // trunk loads the wasm, then fires this event and puts the Rust exports on
+      // window.wasmBindings. The browser calls `loop` once per screen refresh; the
+      // simulation itself (and the drawing) is all Rust, in App.frame.
+      addEventListener("TrunkApplicationStarted", () => {
+        const app = new window.wasmBindings.App("robot");
+        const loop = (now) => {
+          app.frame(now);
+          requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+      });
+    </script>
   </body>
 </html>
